@@ -1,7 +1,7 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "d68f4fc3-8bfc-4762-813f-0d63c5e2d8b5",
+  "id": "bda562e6-a791-4b01-b245-3badf98c48f9",
   "prevId": "7f95ddfe-afe8-4a71-828c-186f3fd7dc3d",
   "tables": {
     "ad_template_recipes": {
@@ -790,21 +790,7 @@
         }
       },
       "indexes": {},
-      "foreignKeys": {
-        "garment_sets_character_id_characters_id_fk": {
-          "name": "garment_sets_character_id_characters_id_fk",
-          "tableFrom": "garment_sets",
-          "tableTo": "characters",
-          "columnsFrom": [
-            "character_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "set null",
-          "onUpdate": "no action"
-        }
-      },
+      "foreignKeys": {},
       "compositePrimaryKeys": {},
       "uniqueConstraints": {},
       "checkConstraints": {}
@@ -1036,6 +1022,13 @@
           "notNull": true,
           "autoincrement": false
         },
+        "character_snapshot": {
+          "name": "character_snapshot",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
         "pose_id": {
           "name": "pose_id",
           "type": "text",
@@ -1137,19 +1130,6 @@
           "tableTo": "garment_sets",
           "columnsFrom": [
             "garment_set_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
-        },
-        "looks_character_id_characters_id_fk": {
-          "name": "looks_character_id_characters_id_fk",
-          "tableFrom": "looks",
-          "tableTo": "characters",
-          "columnsFrom": [
-            "character_id"
           ],
           "columnsTo": [
             "id"

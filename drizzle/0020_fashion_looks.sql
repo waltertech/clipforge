@@ -4,8 +4,7 @@ CREATE TABLE `garment_sets` (
 	`garment_ids` text NOT NULL,
 	`character_id` text,
 	`created_at` integer,
-	`updated_at` integer,
-	FOREIGN KEY (`character_id`) REFERENCES `characters`(`id`) ON UPDATE no action ON DELETE set null
+	`updated_at` integer
 );
 --> statement-breakpoint
 CREATE TABLE `garments` (
@@ -25,6 +24,7 @@ CREATE TABLE `looks` (
 	`id` text PRIMARY KEY NOT NULL,
 	`garment_set_id` text NOT NULL,
 	`character_id` text NOT NULL,
+	`character_snapshot` text,
 	`pose_id` text NOT NULL,
 	`look_preset_id` text,
 	`route` text NOT NULL,
@@ -38,6 +38,5 @@ CREATE TABLE `looks` (
 	`error` text,
 	`created_at` integer,
 	`updated_at` integer,
-	FOREIGN KEY (`garment_set_id`) REFERENCES `garment_sets`(`id`) ON UPDATE no action ON DELETE cascade,
-	FOREIGN KEY (`character_id`) REFERENCES `characters`(`id`) ON UPDATE no action ON DELETE cascade
+	FOREIGN KEY (`garment_set_id`) REFERENCES `garment_sets`(`id`) ON UPDATE no action ON DELETE cascade
 );

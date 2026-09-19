@@ -65,6 +65,18 @@ export interface LookResult {
   extra?: Record<string, unknown>;
 }
 
+/**
+ * Presenter facts the client sends with a Look request (presenters live in the client
+ * character store, not the DB) and that the server freezes onto the Look row.
+ */
+export interface LookCharacterSnapshot {
+  id: string;
+  name: string;
+  appearance?: string;
+  /** Character sheet / reference photo URLs (server-resolvable: /api/files/... or absolute) */
+  referenceImages: string[];
+}
+
 /** Vision-LLM quality score for one Look. All axes 0–5; higher is better (incl. `artifact`). */
 export interface LookScore {
   /** Garment colour / pattern / cut fidelity to the garment reference */

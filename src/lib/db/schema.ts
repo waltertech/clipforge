@@ -15,7 +15,7 @@ import type {
   ShotQualityContract,
 } from "@/lib/generation-quality";
 import type { GenerationControlSummary } from "@/lib/video-repair-plan";
-import type { LookScore, TryOnRouteId, GarmentView } from "@/lib/tryon/types";
+import type { LookScore, TryOnRouteId, GarmentView, LookCharacterSnapshot } from "@/lib/tryon/types";
 import type { GarmentCategory } from "@/lib/pose-presets";
 
 // Projects table
@@ -389,12 +389,14 @@ export const garments = sqliteTable("garments", {
   updatedAt: integer("updated_at", { mode: "timestamp" }).$defaultFn(() => new Date()),
 });
 
-// Garment sets table — one outfit: 1–5 garments ordered inner → outer, optionally pinned to a presenter
+// Garment sets table — one outfit: 1–5 garments ordered inner → outer, optionally pinned to a presenter.
+// `characterId` is NOT a foreign key: presenters live in the client-side character store
+// (useCharacterStore, localStorage), and the DB `characters` table is only a mirror.
 export const garmentSets = sqliteTable("garment_sets", {
   id: text("id").primaryKey().$defaultFn(() => crypto.randomUUID()),
   name: text("name").notNull(),
   garmentIds: text("garment_ids", { mode: "json" }).$type<string[]>().notNull(),
-  characterId: text("character_id").references(() => characters.id, { onDelete: "set null" }),
+  characterId: text("character_id"),
   createdAt: integer("created_at", { mode: "timestamp" }).$defaultFn(() => new Date()),
   updatedAt: integer("updated_at", { mode: "timestamp" }).$defaultFn(() => new Date()),
 });
@@ -404,7 +406,9 @@ export const garmentSets = sqliteTable("garment_sets", {
 export const looks = sqliteTable("looks", {
   id: text("id").primaryKey().$defaultFn(() => crypto.randomUUID()),
   garmentSetId: text("garment_set_id").notNull().references(() => garmentSets.id, { onDelete: "cascade" }),
-  characterId: text("character_id").notNull().references(() => characters.id, { onDelete: "cascade" }),
+  characterId: text("character_id").notNull(), // client character-store id (no FK, see garment_sets)
+  // Presenter facts frozen at generation time so the Look stays reproducible if the presenter is edited later
+  characterSnapshot: text("character_snapshot", { mode: "json" }).$type<LookCharacterSnapshot>(),
   poseId: text("pose_id").notNull(), // pose-presets id
   lookPresetId: text("look_preset_id"), // look-presets id (lighting / backdrop)
   route: text("route", { enum: ["compose", "vton"] }).$type<TryOnRouteId>().notNull(),
