@@ -65,3 +65,57 @@ describe("computeGridCells", () => {
     expect(cells[0].w).toBe(300 - 2 * Math.round(300 * 0.02));
   });
 });
+
+describe("garmentImage 参考位", () => {
+  const shots = [shot(1, "hook", "女生对镜头惊讶"), shot(2, "demo", "上手使用产品"), shot(3, "cta", "举起产品推荐")];
+  const cast: ScriptCharacter[] = [
+    { id: "char_a", name: "小美", gender: "female", persona: "活泼", appearance: "22 岁高马尾白 T 恤" } as ScriptCharacter,
+  ];
+  const garmentLine = (n: number) =>
+    `第 ${n} 张参考图是服装参考图——九格中人物所穿服装的款式、颜色、图案与版型必须与其完全一致，不得换装。`;
+
+  it("sheet+garment / garment only / garment+product / 三者齐全 的编号顺序", () => {
+    const sheetGarment = buildStoryboardGridPrompt(shots, cast, { characterSheet: true, garmentImage: true });
+    expect(sheetGarment).toContain("第 1 张参考图是出镜人物的四视图定妆照");
+    expect(sheetGarment).toContain(garmentLine(2));
+    expect(sheetGarment).not.toContain("商品实拍图");
+
+    const garmentOnly = buildStoryboardGridPrompt(shots, cast, { garmentImage: true });
+    expect(garmentOnly).toContain(garmentLine(1));
+    expect(garmentOnly).not.toContain("定妆照");
+    expect(garmentOnly).not.toContain("商品实拍图");
+
+    const garmentProduct = buildStoryboardGridPrompt(shots, cast, { garmentImage: true, productImage: true });
+    expect(garmentProduct).toContain(garmentLine(1));
+    expect(garmentProduct).toContain("第 2 张参考图是商品实拍图");
+    expect(garmentProduct).not.toContain("定妆照");
+
+    const all = buildStoryboardGridPrompt(shots, cast, {
+      characterSheet: true,
+      garmentImage: true,
+      productImage: true,
+    });
+    expect(all).toContain("第 1 张参考图是出镜人物的四视图定妆照");
+    expect(all).toContain(garmentLine(2));
+    expect(all).toContain("第 3 张参考图是商品实拍图");
+  });
+
+  it("不传 garmentImage 时输出与改动前逐字节一致", () => {
+    const none = buildStoryboardGridPrompt(shots, cast);
+    expect(buildStoryboardGridPrompt(shots, cast, { garmentImage: false })).toBe(none);
+    expect(buildStoryboardGridPrompt(shots, cast, {})).toBe(none);
+
+    const both = buildStoryboardGridPrompt(shots, cast, { characterSheet: true, productImage: true });
+    expect(
+      buildStoryboardGridPrompt(shots, cast, { characterSheet: true, garmentImage: false, productImage: true })
+    ).toBe(both);
+    expect(both).toContain("第 1 张参考图是出镜人物的四视图定妆照");
+    expect(both).toContain("第 2 张参考图是商品实拍图");
+    expect(both).not.toContain("服装参考图");
+
+    const productOnly = buildStoryboardGridPrompt(shots, cast, { productImage: true });
+    expect(buildStoryboardGridPrompt(shots, cast, { garmentImage: false, productImage: true })).toBe(productOnly);
+    expect(productOnly).toContain("第 1 张参考图是商品实拍图");
+    expect(productOnly).not.toContain("服装参考图");
+  });
+});

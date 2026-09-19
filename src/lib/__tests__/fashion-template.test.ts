@@ -208,3 +208,36 @@ describe("share v2 与 v1 兼容", () => {
     expect(fashion.every((t: AdTemplate) => t.kind === "fashion")).toBe(true);
   });
 });
+
+describe("内置时装模板", () => {
+  const FASHION_IDS = ["runway_walk", "mirror_turn", "ootd_talk", "detail_macro"] as const;
+
+  it("4 款存在、isFashionTemplate 为真、sanitizeFashionFields 无 issues", () => {
+    for (const id of FASHION_IDS) {
+      const t = AD_TEMPLATES.find((x) => x.id === id);
+      expect(t, id).toBeDefined();
+      expect(isFashionTemplate(t)).toBe(true);
+      expect(sanitizeFashionFields(t!.fashion).issues).toEqual([]);
+    }
+  });
+
+  it("listAdTemplates({kind:\"fashion\"}) 正好 4 款；category fashion 含这 4 款", () => {
+    const byKind = listAdTemplates({ kind: "fashion" });
+    expect(byKind).toHaveLength(4);
+    expect(byKind.map((t) => t.id).sort()).toEqual([...FASHION_IDS].sort());
+    const byCat = listAdTemplates({ category: "fashion" });
+    for (const id of FASHION_IDS) {
+      expect(byCat.some((t) => t.id === id), id).toBe(true);
+    }
+  });
+
+  it("每款经 exportAdTemplateShare/parseAdTemplateShare 往返后 fashion 深等", () => {
+    for (const id of FASHION_IDS) {
+      const t = AD_TEMPLATES.find((x) => x.id === id)!;
+      const result = parseAdTemplateShare(exportAdTemplateShare(t));
+      expect(result.error, id).toBeUndefined();
+      expect(result.template?.fashion, id).toEqual(t.fashion);
+      expect(result.warnings ?? [], id).toEqual([]);
+    }
+  });
+});

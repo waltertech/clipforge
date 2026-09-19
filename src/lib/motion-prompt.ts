@@ -85,6 +85,8 @@ export interface MotionPromptInput {
    * Defaults to "auto" so every hands-off chain gets the quality layers without wiring.
    */
   realism?: MotionRealismTier;
+  /** Fashion Look lock: keep outfit / face fixed through the i2v pass; `negative` appended verbatim */
+  lock?: { face: boolean; garmentPattern: boolean; noOutfitChange: boolean; negative?: { zh: string; en: string } };
 }
 
 /** Realism-layer tier for buildMotionPrompt (a user-facing single-select). */
@@ -254,6 +256,39 @@ function normalizeCategory(category: string | undefined): ProductCategory | unde
   return category && category in CATEGORY_CONSTRAINTS ? (category as ProductCategory) : undefined;
 }
 
+/** Fashion Look lock sentences — one per true flag, then an optional negative line. */
+function fashionLockLines(
+  lock: NonNullable<MotionPromptInput["lock"]>,
+  lang: "zh" | "en"
+): string[] {
+  const lines: string[] = [];
+  if (lock.face) {
+    lines.push(
+      lang === "zh"
+        ? "人物的脸型、五官与发型全程保持不变"
+        : "the person's face, features and hairstyle stay identical throughout"
+    );
+  }
+  if (lock.garmentPattern) {
+    lines.push(
+      lang === "zh"
+        ? "服装的颜色、图案与版型全程保持与首帧完全一致"
+        : "garment colour, pattern and cut stay exactly as in the first frame throughout"
+    );
+  }
+  if (lock.noOutfitChange) {
+    lines.push(
+      lang === "zh"
+        ? "不得换装、不得增减衣物或配饰"
+        : "no outfit change, no garments or accessories added or removed"
+    );
+  }
+  if (lock.negative) {
+    lines.push(lang === "zh" ? `避免：${lock.negative.zh}` : `Avoid: ${lock.negative.en}`);
+  }
+  return lines;
+}
+
 /** Universal stability/artifact tail — cheap, consistent win against flicker and morphing. */
 const QUALITY_TAIL = {
   zh: "画面稳定流畅，光影自然过渡，无闪烁、无变形、不出现新物体",
@@ -371,6 +406,7 @@ export function buildMotionPrompt(input: MotionPromptInput): string {
     if (input.productShot) parts.push(PRODUCT_CONSTRAINT.zh);
     if (input.productShot && category) parts.push(CATEGORY_CONSTRAINTS[category].zh);
     parts.push(SOUND_DIRECTION.zh);
+    if (input.lock) parts.push(...fashionLockLines(input.lock, "zh"));
     parts.push(QUALITY_TAIL.zh);
     return parts.join("。") + "。";
   }
@@ -388,6 +424,7 @@ export function buildMotionPrompt(input: MotionPromptInput): string {
   if (input.productShot) parts.push(PRODUCT_CONSTRAINT.en);
   if (input.productShot && category) parts.push(CATEGORY_CONSTRAINTS[category].en);
   parts.push(SOUND_DIRECTION.en);
+  if (input.lock) parts.push(...fashionLockLines(input.lock, "en"));
   parts.push(QUALITY_TAIL.en);
   return parts.join(". ") + ".";
 }
