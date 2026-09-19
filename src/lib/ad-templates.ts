@@ -23,6 +23,7 @@ import { getCameraPreset } from "@/lib/camera-presets";
 import { getLookPreset } from "@/lib/look-presets";
 import { isCaptionPreset } from "@/lib/caption-presets";
 import { checkAdCompliance } from "@/lib/ad-compliance";
+import { DEFAULT_POSE_SEQUENCE, GARMENT_CATEGORIES, isPoseId, type GarmentCategory } from "@/lib/pose-presets";
 
 /**
  * Template groups — browse by what the finished video looks like, not by internal
@@ -64,6 +65,249 @@ export interface AdTemplate {
   compose: StylePackCompose;
   /** Extra one-line creative direction appended to the script prompt */
   scriptHint: { zh: string };
+  /** Template kind. Omitted = "ad" (every pre-fashion template). */
+  kind?: AdTemplateKind;
+  /** Fashion-only recipe fields; present iff kind === "fashion" */
+  fashion?: FashionFields;
+}
+
+/* ==================== Fashion (garment → Look → video) templates ==================== */
+
+export type AdTemplateKind = "ad" | "fashion";
+
+/** How on-camera words drive the video: none = visuals + BGM only. */
+export type FashionScriptPattern = "none" | "voiceover" | "on-camera";
+
+/** Where each shot's first frame comes from. */
+export type FashionLookSource = "accepted" | "grid";
+
+export type WordAnchorElement = "price_card" | "selling_point" | "brand_tag" | "sfx" | "caption_emphasis";
+
+/**
+ * A word anchor ties an on-screen element to a WORD in the shot's line rather than a
+ * second: rewrite the line for another garment and the card still lands on the right beat.
+ */
+export interface WordAnchor {
+  /** Shot index into poseSequence (0-based) */
+  shot: number;
+  /** Trigger: first/last word of the shot's line, or the first hit of a keyword */
+  at: "first" | "last" | { keyword: string };
+  element: WordAnchorElement;
+  /** Card copy or SFX id */
+  payload?: string;
+  /** Hold time in seconds; omitted = until the shot ends */
+  seconds?: number;
+}
+
+export interface FashionFields {
+  /** One pose per shot (pose-presets ids), 1–9 entries */
+  poseSequence: string[];
+  /** Shot type per pose; omitted → first hook, last cta, rest demo */
+  shotRoles?: Array<Shot["type"]>;
+  /** Seconds per shot (2–15 each, ≤ 60 total); omitted → even split */
+  shotSeconds?: number[];
+  lookSource: FashionLookSource;
+  /** Garment categories the template is tuned for; omitted = any */
+  garmentCategories?: GarmentCategory[];
+  lock: { face: boolean; garmentPattern: boolean; noOutfitChange: boolean };
+  /** Negative constraints appended to the i2v motion prompt */
+  negative: { zh: string; en: string };
+  scriptPattern: FashionScriptPattern;
+  wordAnchors?: WordAnchor[];
+  /** Which inputs a batch run may swap while keeping the recipe */
+  slots?: { model: boolean; garmentSet: boolean; hook: boolean };
+  /** Provenance when derived from a reference video (structure only; never the footage) */
+  derivedFrom?: { referenceId: string; derivedAt: string; shotCount: number };
+}
+
+/** True when the template carries the fashion recipe. */
+export function isFashionTemplate(t: AdTemplate | null | undefined): t is AdTemplate & { kind: "fashion"; fashion: FashionFields } {
+  return !!t && t.kind === "fashion" && !!t.fashion;
+}
+
+export const FASHION_MAX_SHOTS = 9;
+export const FASHION_SHOT_SECONDS_MIN = 2;
+export const FASHION_SHOT_SECONDS_MAX = 15;
+export const FASHION_TOTAL_SECONDS_MAX = 60;
+
+const FASHION_DEFAULT_NEGATIVE = {
+  zh: "服装变色、图案变化、换衣服、换脸、发型变化、多手指、文字水印",
+  en: "garment colour shift, pattern change, outfit swap, face change, hairstyle change, extra fingers, text or watermark",
+} as const;
+
+const FASHION_SCRIPT_PATTERNS = new Set<FashionScriptPattern>(["none", "voiceover", "on-camera"]);
+const FASHION_LOOK_SOURCES = new Set<FashionLookSource>(["accepted", "grid"]);
+const WORD_ANCHOR_ELEMENTS = new Set<WordAnchorElement>(["price_card", "selling_point", "brand_tag", "sfx", "caption_emphasis"]);
+
+export interface FashionSanitizeResult {
+  fields: FashionFields;
+  /** Human-readable notes on what was dropped or defaulted (editor "needs confirmation" list) */
+  issues: string[];
+}
+
+/**
+ * Clamp LLM / import / editor output into a valid FashionFields. Same philosophy as
+ * sanitizeCustomAdTemplate: unknown ids are dropped and empties fall back to defaults
+ * so the pipeline never sees an unknown pose — but every correction is reported in
+ * `issues` so an editor can show the user what changed instead of silently diverging.
+ */
+export function sanitizeFashionFields(raw: unknown): FashionSanitizeResult {
+  const issues: string[] = [];
+  const r = (raw && typeof raw === "object" ? raw : {}) as Record<string, unknown>;
+
+  let poseSequence: string[] = [];
+  if (Array.isArray(r.poseSequence)) {
+    for (const p of r.poseSequence) {
+      if (isPoseId(p)) poseSequence.push(p);
+      else issues.push(`unknown pose id dropped: ${String(p)}`);
+    }
+  }
+  if (poseSequence.length > FASHION_MAX_SHOTS) {
+    issues.push(`poseSequence truncated to ${FASHION_MAX_SHOTS} shots`);
+    poseSequence = poseSequence.slice(0, FASHION_MAX_SHOTS);
+  }
+  if (poseSequence.length === 0) {
+    issues.push("poseSequence empty — default sequence applied");
+    poseSequence = [...DEFAULT_POSE_SEQUENCE];
+  }
+  const n = poseSequence.length;
+
+  let shotRoles: Array<Shot["type"]> | undefined;
+  if (Array.isArray(r.shotRoles)) {
+    const roles = r.shotRoles.filter((x): x is Shot["type"] => SHOT_TYPES.has(String(x)));
+    if (roles.length === n && roles.length === r.shotRoles.length) shotRoles = roles;
+    else issues.push("shotRoles dropped — length or values did not match poseSequence");
+  }
+
+  let shotSeconds: number[] | undefined;
+  if (Array.isArray(r.shotSeconds)) {
+    const secs = r.shotSeconds.map((x) => (typeof x === "number" && Number.isFinite(x) ? x : NaN));
+    const valid = secs.length === n && secs.every((s) => !Number.isNaN(s));
+    if (!valid) {
+      issues.push("shotSeconds dropped — length or values did not match poseSequence");
+    } else {
+      const clamped = secs.map((s) => Math.min(FASHION_SHOT_SECONDS_MAX, Math.max(FASHION_SHOT_SECONDS_MIN, Math.round(s * 2) / 2)));
+      if (clamped.some((s, i) => s !== secs[i])) issues.push("shotSeconds clamped to 2–15s each");
+      const total = clamped.reduce((a, b) => a + b, 0);
+      if (total > FASHION_TOTAL_SECONDS_MAX) issues.push(`shotSeconds dropped — total ${total}s exceeds ${FASHION_TOTAL_SECONDS_MAX}s`);
+      else shotSeconds = clamped;
+    }
+  }
+
+  const lookSource = FASHION_LOOK_SOURCES.has(r.lookSource as FashionLookSource) ? (r.lookSource as FashionLookSource) : "accepted";
+  if (r.lookSource !== undefined && r.lookSource !== lookSource) issues.push("lookSource defaulted to accepted");
+
+  let garmentCategories: GarmentCategory[] | undefined;
+  if (Array.isArray(r.garmentCategories)) {
+    const cats = r.garmentCategories.filter((c): c is GarmentCategory => (GARMENT_CATEGORIES as readonly string[]).includes(String(c)));
+    if (cats.length !== r.garmentCategories.length) issues.push("unknown garmentCategories dropped");
+    if (cats.length > 0) garmentCategories = [...new Set(cats)];
+  }
+
+  const lockRaw = (r.lock && typeof r.lock === "object" ? r.lock : {}) as Record<string, unknown>;
+  const bool = (v: unknown, def: boolean) => (typeof v === "boolean" ? v : def);
+  const lock = {
+    face: bool(lockRaw.face, true),
+    garmentPattern: bool(lockRaw.garmentPattern, true),
+    noOutfitChange: bool(lockRaw.noOutfitChange, true),
+  };
+  if (!r.lock || typeof r.lock !== "object") issues.push("lock defaulted to all-true");
+
+  const negRaw = (r.negative && typeof r.negative === "object" ? r.negative : {}) as Record<string, unknown>;
+  const negStr = (v: unknown) => (typeof v === "string" ? v.trim().slice(0, 300) : "");
+  const negative = {
+    zh: negStr(negRaw.zh) || FASHION_DEFAULT_NEGATIVE.zh,
+    en: negStr(negRaw.en) || FASHION_DEFAULT_NEGATIVE.en,
+  };
+  if (!negStr(negRaw.zh) || !negStr(negRaw.en)) issues.push("negative defaulted");
+
+  const scriptPattern = FASHION_SCRIPT_PATTERNS.has(r.scriptPattern as FashionScriptPattern)
+    ? (r.scriptPattern as FashionScriptPattern)
+    : "none";
+  if (r.scriptPattern !== undefined && r.scriptPattern !== scriptPattern) issues.push("scriptPattern defaulted to none");
+
+  let wordAnchors: WordAnchor[] | undefined;
+  if (Array.isArray(r.wordAnchors)) {
+    const out: WordAnchor[] = [];
+    for (const a of r.wordAnchors) {
+      const anchor = sanitizeWordAnchor(a, n, scriptPattern);
+      if (anchor) out.push(anchor);
+      else issues.push("invalid wordAnchor dropped");
+    }
+    if (out.length > 0) wordAnchors = out;
+  }
+
+  let slots: FashionFields["slots"];
+  if (r.slots && typeof r.slots === "object") {
+    const s = r.slots as Record<string, unknown>;
+    slots = { model: bool(s.model, true), garmentSet: bool(s.garmentSet, true), hook: bool(s.hook, false) };
+  }
+
+  let derivedFrom: FashionFields["derivedFrom"];
+  if (r.derivedFrom && typeof r.derivedFrom === "object") {
+    const d = r.derivedFrom as Record<string, unknown>;
+    if (typeof d.referenceId === "string" && d.referenceId.trim()) {
+      derivedFrom = {
+        referenceId: d.referenceId.trim().slice(0, 64),
+        derivedAt: typeof d.derivedAt === "string" ? d.derivedAt.slice(0, 40) : new Date(0).toISOString(),
+        shotCount: typeof d.shotCount === "number" && Number.isFinite(d.shotCount) ? Math.max(0, Math.round(d.shotCount)) : n,
+      };
+    }
+  }
+
+  return {
+    fields: {
+      poseSequence,
+      ...(shotRoles && { shotRoles }),
+      ...(shotSeconds && { shotSeconds }),
+      lookSource,
+      ...(garmentCategories && { garmentCategories }),
+      lock,
+      negative,
+      scriptPattern,
+      ...(wordAnchors && { wordAnchors }),
+      ...(slots && { slots }),
+      ...(derivedFrom && { derivedFrom }),
+    },
+    issues,
+  };
+}
+
+function sanitizeWordAnchor(raw: unknown, shotCount: number, scriptPattern: FashionScriptPattern): WordAnchor | null {
+  if (!raw || typeof raw !== "object") return null;
+  const a = raw as Record<string, unknown>;
+  if (typeof a.shot !== "number" || !Number.isInteger(a.shot) || a.shot < 0 || a.shot >= shotCount) return null;
+  if (!WORD_ANCHOR_ELEMENTS.has(a.element as WordAnchorElement)) return null;
+  const element = a.element as WordAnchorElement;
+  // no words → only sound effects can be anchored (they trigger on shot boundaries)
+  if (scriptPattern === "none" && element !== "sfx") return null;
+  let at: WordAnchor["at"];
+  if (a.at === "first" || a.at === "last") at = a.at;
+  else if (a.at && typeof a.at === "object" && typeof (a.at as Record<string, unknown>).keyword === "string") {
+    const kw = ((a.at as Record<string, unknown>).keyword as string).trim().slice(0, 20);
+    if (!kw) return null;
+    at = { keyword: kw };
+  } else return null;
+  const payload = typeof a.payload === "string" ? a.payload.trim().slice(0, 60) : undefined;
+  const seconds =
+    typeof a.seconds === "number" && Number.isFinite(a.seconds) && a.seconds > 0
+      ? Math.min(FASHION_SHOT_SECONDS_MAX, Math.round(a.seconds * 2) / 2)
+      : undefined;
+  return { shot: a.shot, at, element, ...(payload && { payload }), ...(seconds !== undefined && { seconds }) };
+}
+
+/** Default shot roles for a pose sequence: hook → demo… → cta (single shot = hook). */
+export function defaultFashionShotRoles(count: number): Array<Shot["type"]> {
+  if (count <= 0) return [];
+  if (count === 1) return ["hook"];
+  return Array.from({ length: count }, (_, i) => (i === 0 ? "hook" : i === count - 1 ? "cta" : "demo"));
+}
+
+/** Even split of a target duration across shots, honouring per-shot bounds. */
+export function defaultFashionShotSeconds(count: number, totalSeconds = 12): number[] {
+  if (count <= 0) return [];
+  const per = Math.min(FASHION_SHOT_SECONDS_MAX, Math.max(FASHION_SHOT_SECONDS_MIN, Math.round((totalSeconds / count) * 2) / 2));
+  return Array.from({ length: count }, () => per);
 }
 
 export const AD_TEMPLATES: AdTemplate[] = [
@@ -5435,9 +5679,17 @@ export function getAdTemplate(id: string | undefined | null): AdTemplate | undef
  * partition — order inside each half is preserved, so curation order still
  * matters).
  */
-export function listAdTemplates(opts?: { group?: AdTemplateGroupId | "all"; category?: string; query?: string }): AdTemplate[] {
+export function listAdTemplates(opts?: {
+  group?: AdTemplateGroupId | "all";
+  category?: string;
+  query?: string;
+  /** Template kind filter; "all" (default) keeps ad + fashion together */
+  kind?: AdTemplateKind | "all";
+}): AdTemplate[] {
   const group = opts?.group && opts.group !== "all" ? opts.group : undefined;
   let pool = group ? AD_TEMPLATES.filter((t) => t.group === group) : [...AD_TEMPLATES];
+  const kind = opts?.kind && opts.kind !== "all" ? opts.kind : undefined;
+  if (kind) pool = pool.filter((t) => (t.kind ?? "ad") === kind);
   const query = opts?.query?.trim().toLowerCase();
   if (query) {
     pool = pool.filter((t) =>
@@ -5653,8 +5905,13 @@ export function sanitizeCustomAdTemplate(raw: unknown): AdTemplate | null {
     ? (r.goodFor.filter((c) => ["beauty", "food", "home", "fashion", "digital"].includes(String(c))) as AdTemplateCategory[])
     : [];
 
+  // fashion recipe travels only under kind === "fashion"; a stray `fashion` block on an ad template is dropped
+  const isFashion = r.kind === "fashion";
+  const fashion = isFashion ? sanitizeFashionFields(r.fashion).fields : undefined;
+
   return {
     id: CUSTOM_AD_TEMPLATE_ID,
+    ...(isFashion && { kind: "fashion" as const, fashion }),
     emoji: str(r.emoji, 8) || "✨",
     name: { zh: nameZh, en: nameEn },
     tagline: {
@@ -5761,7 +6018,9 @@ export function adTemplateAppliedKey(projectId: string): string {
  * stage scans the actual voiceover/captions of the finished video.
  */
 export const AD_TEMPLATE_SHARE_KIND = "clipforge-ad-template";
-export const AD_TEMPLATE_SHARE_VERSION = 1;
+/** v1 = ad recipes only; v2 adds `kind` + `fashion`. Exports write the current version; imports accept both. */
+export const AD_TEMPLATE_SHARE_VERSION = 2;
+const AD_TEMPLATE_SHARE_ACCEPTED_VERSIONS = new Set([1, 2]);
 
 export type AdTemplateShareError =
   | "invalid_json"
@@ -5797,7 +6056,7 @@ export function parseAdTemplateShare(raw: string): AdTemplateShareResult {
   }
   const envelope = parsed as { kind?: unknown; version?: unknown; template?: unknown } | null;
   if (!envelope || envelope.kind !== AD_TEMPLATE_SHARE_KIND) return { error: "wrong_kind" };
-  if (envelope.version !== AD_TEMPLATE_SHARE_VERSION) return { error: "unsupported_version" };
+  if (!AD_TEMPLATE_SHARE_ACCEPTED_VERSIONS.has(envelope.version as number)) return { error: "unsupported_version" };
   const template = sanitizeCustomAdTemplate(envelope.template);
   if (!template) return { error: "invalid_template" };
   const warnings = complianceTerms(template);
@@ -5806,8 +6065,9 @@ export function parseAdTemplateShare(raw: string): AdTemplateShareResult {
 
 /** Ad-law lexicon hits in one template's recipe copy (shared by single + pack parsing). */
 function complianceTerms(template: AdTemplate): string[] {
+  const anchorCopy = template.fashion?.wordAnchors?.map((a) => a.payload ?? "") ?? [];
   return checkAdCompliance(
-    [template.name.zh, template.tagline.zh, template.scriptHint.zh].join(" \n ")
+    [template.name.zh, template.tagline.zh, template.scriptHint.zh, ...anchorCopy].join(" \n ")
   ).map((v) => v.term);
 }
 
@@ -5857,7 +6117,7 @@ export function parseAdTemplateShareAny(raw: string): AdTemplatePackResult {
   if (!envelope || (envelope.kind !== AD_TEMPLATE_SHARE_KIND && envelope.kind !== AD_TEMPLATE_PACK_KIND)) {
     return { error: "wrong_kind" };
   }
-  if (envelope.version !== AD_TEMPLATE_SHARE_VERSION) return { error: "unsupported_version" };
+  if (!AD_TEMPLATE_SHARE_ACCEPTED_VERSIONS.has(envelope.version as number)) return { error: "unsupported_version" };
   const entries =
     envelope.kind === AD_TEMPLATE_PACK_KIND
       ? Array.isArray(envelope.templates)
