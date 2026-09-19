@@ -33,6 +33,7 @@ import { LLM_PRESETS } from "@/lib/llm-presets";
 import { ModelPicker } from "@/components/settings/model-picker";
 import { GenerationSettings } from "@/components/generation-settings";
 import { PresenterManager } from "@/components/presenter-manager";
+import { TryOnSettings } from "@/components/settings/tryon-settings";
 
 // default resolution options
 const resolutionOptions = [
@@ -55,6 +56,7 @@ const SETTINGS_SECTIONS = [
   { id: "video", labelKey: "tabVideo" },
   { id: "tts", labelKey: "tabTts" },
   { id: "characters", labelKey: "tabCharacters" },
+  { id: "tryon", labelKey: "tabTryon" },
   { id: "brand", labelKey: "tabBrand" },
 ];
 const SETTINGS_TABS: string[] = SETTINGS_SECTIONS.map((s) => s.id);
@@ -1082,6 +1084,11 @@ export default function SettingsPage() {
           {tab === "characters" && (
           <section className="min-w-0 flex-1">
             <PresenterManager />
+          </section>
+          )}
+          {tab === "tryon" && (
+          <section className="min-w-0 flex-1">
+            <TryOnSettings />
           </section>
           )}
           {/* Tab 4: brand settings */}

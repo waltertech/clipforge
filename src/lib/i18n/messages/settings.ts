@@ -197,6 +197,21 @@ export const settings: NamespaceMessages = {
     brandOutroTextLabel: "片尾文字",
     brandOutroTextPlaceholder: "如：关注我们获取更多好物推荐",
     brandOutroTip: "片尾文字会叠加在品牌色背景上展示",
+
+    // 试衣 / Try-on
+    tabTryon: "试衣",
+    tryonTitle: "试衣",
+    tryonSubtitle: "Look 生成默认走哪条路线，以及 FASHN 精确试衣的接入信息。",
+    tryonRouteLabel: "默认路线",
+    tryonRouteCompose: "合成 compose",
+    tryonRouteVton: "精确试衣 vton",
+    tryonRouteComposeHint: "用现有生图模型，把模特定妆图和服装参考一次合成。无需额外服务，适合 1–5 件叠穿。",
+    tryonRouteVtonHint: "走 FASHN 虚拟试衣，单件更准；多件会按类目串行叠穿。需要 API Key 或自托管地址。",
+    tryonFashnKeyLabel: "FASHN API Key",
+    tryonFashnKeyPlaceholder: "粘贴 FASHN API Key",
+    tryonFashnBaseUrlLabel: "FASHN 接入点（选填）",
+    tryonFashnBaseUrlPlaceholder: "留空走官方；自托管时填写 base URL",
+    tryonVtonLaterNote: "vton 路线将在后续里程碑接通；现在可以先填好 Key，生成仍可选用 compose。",
   },
   en: {
     backHome: "Back to home",
@@ -393,5 +408,20 @@ export const settings: NamespaceMessages = {
     brandOutroTextLabel: "Outro text",
     brandOutroTextPlaceholder: "e.g. Follow us for more great finds",
     brandOutroTip: "The outro text is overlaid on a brand-color background",
+
+    // Try-on
+    tabTryon: "Try-on",
+    tryonTitle: "Try-on",
+    tryonSubtitle: "Default Look generation route, plus FASHN credentials for precise virtual try-on.",
+    tryonRouteLabel: "Default route",
+    tryonRouteCompose: "Compose",
+    tryonRouteVton: "VTON",
+    tryonRouteComposeHint: "One multi-reference generation with your existing image model. No extra service; works for 1–5 layered pieces.",
+    tryonRouteVtonHint: "FASHN virtual try-on is more precise per garment; multiple pieces run serially. Needs an API key or a self-hosted URL.",
+    tryonFashnKeyLabel: "FASHN API key",
+    tryonFashnKeyPlaceholder: "Paste your FASHN API key",
+    tryonFashnBaseUrlLabel: "FASHN endpoint (optional)",
+    tryonFashnBaseUrlPlaceholder: "Leave blank for the official API; set a base URL for self-hosted",
+    tryonVtonLaterNote: "The VTON route lands in a later milestone. You can save the key now; generation can still use compose.",
   },
 };

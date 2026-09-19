@@ -20,6 +20,8 @@ import { mediaLab } from "./mediaLab";
 import { production } from "./production";
 import { transcript } from "./transcript";
 import { materials } from "./materials";
+import { garments } from "./garments";
+import { looks } from "./looks";
 
 // 所有命名空间集中注册（新增页面时在此追加一行）
 const namespaces = {
@@ -44,6 +46,8 @@ const namespaces = {
   production,
   transcript,
   materials,
+  garments,
+  looks,
 };
 
 /** messages[locale][namespace][key] = 翻译文本 */
