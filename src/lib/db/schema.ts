@@ -45,6 +45,8 @@ export const projects = sqliteTable("projects", {
   sourceType: text("source_type", { enum: ["manual", "clone"] }).default("manual"), // manual=created by hand, clone=viral-video remake
   sourceVideoUrl: text("source_video_url"), // Source video URL for viral-video remakes
   characterId: text("character_id"), // On-screen character bound to the project (live_presenter mode only)
+  /** Fashion Look → video provenance. Null for every non-fashion project. */
+  fashionSource: text("fashion_source", { mode: "json" }).$type<ProjectFashionSource>(),
   // Project-level production intelligence. JSON columns keep the new planning/memory layer
   // additive: existing projects read null and continue through the original pipeline unchanged.
   creativeIntent: text("creative_intent", { mode: "json" }).$type<CreativeIntent>(),
@@ -434,6 +436,14 @@ export const settings = sqliteTable("settings", {
 });
 
 // ===== Type definitions =====
+
+/** Provenance for a project created from accepted Looks + a fashion template. */
+export interface ProjectFashionSource {
+  garmentSetId: string;
+  templateId: string;
+  characterId: string;
+  garmentImageUrl?: string;
+}
 
 /** Video mode: determines the asset generation strategy */
 export type VideoMode =

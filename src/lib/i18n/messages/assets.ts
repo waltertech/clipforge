@@ -98,6 +98,7 @@ export const assets: NamespaceMessages = {
     mixTiltTip: "实拍/上传/免费实拍素材占比 ≥50%（时长加权）可吃抖音混合内容流量倾斜；纯 AI 打标也可发",
     badgeReal: "实拍",
     badgeAi: "AI",
+    badgeLook: "Look",
     // 上传自有图片（解锁 user_upload 分镜死路 + 任意分镜「换一张」）
     btnUpload: "上传素材",
     btnReplaceUpload: "替换素材",
@@ -274,6 +275,7 @@ export const assets: NamespaceMessages = {
     mixTiltTip: "≥50% real/uploaded/free real-shot footage (duration-weighted) earns Douyin's hybrid traffic tilt; labeled pure-AI is still publishable",
     badgeReal: "real",
     badgeAi: "AI",
+    badgeLook: "Look",
     btnUpload: "Upload",
     btnReplaceUpload: "Replace",
     uploadFailed: "Upload failed, please retry",

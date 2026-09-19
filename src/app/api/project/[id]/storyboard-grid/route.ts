@@ -65,7 +65,7 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
       return apiError(req, "无效的项目ID", "Invalid project id", 400);
     }
     const body = await req.json();
-    const { scriptId, provider: providerName, model, apiKey, baseUrl, options, characterSheetUrl, productImageUrl } = body as {
+    const { scriptId, provider: providerName, model, apiKey, baseUrl, options, characterSheetUrl, garmentImageUrl, productImageUrl } = body as {
       scriptId?: string;
       provider?: string;
       model?: string;
@@ -74,6 +74,8 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
       options?: Record<string, unknown>;
       /** Presenter's multi-view sheet — locks the person's identity across all nine cells */
       characterSheetUrl?: string;
+      /** Garment front photo — locks outfit pattern/cut across all nine cells (fashion projects) */
+      garmentImageUrl?: string;
       /** Product photo — locks the product's appearance across all nine cells */
       productImageUrl?: string;
     };
@@ -104,16 +106,18 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
     }
 
     // reference images (order matters — the prompt cites them by position):
-    // [character sheet?, product photo?]; local /api/files paths travel as Base64
-    const refInputs = [characterSheetUrl, productImageUrl].filter((u): u is string => !!u);
+    // [character sheet?, garment image?, product photo?]; local /api/files paths travel as Base64
+    const refInputs = [characterSheetUrl, garmentImageUrl, productImageUrl].filter((u): u is string => !!u);
     const referenceImageUrls = (await Promise.all(refInputs.map(toRemoteUsableImage))).filter(
       (u): u is string => !!u
     );
 
     // 1) one generation renders every shot — consistency is physical, not prompted;
-    // with references attached the sheet pins the person and the photo pins the product
+    // with references attached the sheet pins the person, the garment pins the outfit,
+    // and the photo pins the product. Ordinals match buildStoryboardGridPrompt's refs.
     const prompt = buildStoryboardGridPrompt(shots, script.characters, {
       characterSheet: !!characterSheetUrl,
+      garmentImage: !!garmentImageUrl,
       productImage: !!productImageUrl,
     });
     const provider = createProvider({ name: providerName, apiKey, baseUrl: baseUrl ?? "" });

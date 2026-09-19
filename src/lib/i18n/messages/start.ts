@@ -161,6 +161,9 @@ export const start: NamespaceMessages = {
     advLink: "高级设置 · 多平台 / 自定义模型 / 生成参数 ›",
     // 新建项目默认名（{name} 为商品名）
     projectName: "{name} 推广",
+    // 从 Look 出片
+    entryLooksVideo: "从 Look 出片",
+    entryLooksVideoDesc: "选服装组与时装模板，用已验收 Look 直接建项目出片",
   },
   en: {
     // 顶部导航
@@ -321,5 +324,8 @@ export const start: NamespaceMessages = {
     advLink: "Advanced · multi-platform / custom models / generation params ›",
     // 新建项目默认名（{name} 为商品名）
     projectName: "{name} Promo",
+    // Video from Looks
+    entryLooksVideo: "Video from Looks",
+    entryLooksVideoDesc: "Pick a garment set and fashion template, then create a project from accepted Looks",
   },
 };
