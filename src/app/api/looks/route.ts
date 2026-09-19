@@ -5,13 +5,15 @@ import { looks } from "@/lib/db/schema";
 import { apiError, errText } from "@/lib/api-error";
 import { toLookDto } from "@/lib/garments";
 
-/** GET /api/looks?garmentSetId= — required query; newest first */
+/** GET /api/looks?garmentSetId=&status= — garmentSetId required; newest first. Optional status filters the list. */
 export async function GET(req: NextRequest) {
   try {
     const garmentSetId = req.nextUrl.searchParams.get("garmentSetId")?.trim() ?? "";
     if (!garmentSetId) {
       return apiError(req, "缺少 garmentSetId", "Missing garmentSetId", 400);
     }
+
+    const status = req.nextUrl.searchParams.get("status")?.trim() ?? "";
 
     const db = getDb();
     const rows = await db
@@ -20,7 +22,10 @@ export async function GET(req: NextRequest) {
       .where(eq(looks.garmentSetId, garmentSetId))
       .orderBy(desc(looks.createdAt));
 
-    return NextResponse.json({ looks: rows.map(toLookDto) });
+    const mapped = rows.map(toLookDto);
+    const filtered = !status || status === "all" ? mapped : mapped.filter((row) => row.status === status);
+
+    return NextResponse.json({ looks: filtered });
   } catch (error) {
     console.error("获取 Look 列表失败:", error);
     return NextResponse.json(

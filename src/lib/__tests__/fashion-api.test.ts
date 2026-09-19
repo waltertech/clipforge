@@ -9,6 +9,7 @@ import {
   matchesLookFilter,
   moveItem,
   parseColorTags,
+  pickBestLookForPose,
   validateGarmentImage,
   GARMENT_MAX_IMAGE_BYTES,
   type Look,
@@ -130,6 +131,17 @@ describe("buildGarmentsQuery", () => {
 
   it("encodes category and q", () => {
     expect(buildGarmentsQuery({ category: "tops", q: "coat" })).toBe("?category=tops&q=coat");
+  });
+});
+
+describe("pickBestLookForPose", () => {
+  it("picks the highest overall among candidate/accepted", () => {
+    const rows = [
+      look({ id: "low", poseId: "front_stand", status: "candidate", score: { garment: 2, pose: 2, identity: 2, artifact: 2, overall: 2, reasons: [] } }),
+      look({ id: "high", poseId: "front_stand", status: "candidate", score: { garment: 5, pose: 5, identity: 5, artifact: 5, overall: 5, reasons: [] } }),
+      look({ id: "failed", poseId: "front_stand", status: "failed", score: { garment: 5, pose: 5, identity: 5, artifact: 5, overall: 5, reasons: [] } }),
+    ];
+    expect(pickBestLookForPose(rows)?.id).toBe("high");
   });
 });
 

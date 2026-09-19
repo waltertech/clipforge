@@ -59,6 +59,19 @@ export const LOOK_POLL_INTERVAL_MS = 3000;
 export const GARMENT_MAX_IMAGE_BYTES = 20 * 1024 * 1024;
 export const GARMENT_IMAGE_MIME_TYPES = ["image/jpeg", "image/png", "image/webp"] as const;
 export const MAX_SET_GARMENTS = MAX_GARMENTS_PER_LOOK;
+
+export type LlmConfigPayload = {
+  baseUrl: string;
+  apiKey?: string;
+  model: string;
+  visionModel?: string;
+};
+
+export type TryonPayload = {
+  fashnApiKey?: string;
+  fashnBaseUrl?: string;
+};
+
 export const GARMENT_CATEGORY_VALUES: readonly GarmentCategory[] = [
   "tops",
   "bottoms",
@@ -317,6 +330,8 @@ export interface GenerateLooksInput {
   apiKey: string;
   baseUrl?: string;
   options?: Record<string, unknown>;
+  llmConfig?: LlmConfigPayload;
+  tryon?: TryonPayload;
 }
 
 export async function generateLooks(input: GenerateLooksInput): Promise<{ lookIds: string[] }> {
@@ -334,6 +349,8 @@ export async function generateLooks(input: GenerateLooksInput): Promise<{ lookId
   };
   if (input.lookPresetId) body.lookPresetId = input.lookPresetId;
   if (input.baseUrl) body.baseUrl = input.baseUrl;
+  if (input.llmConfig) body.llmConfig = input.llmConfig;
+  if (input.tryon) body.tryon = input.tryon;
   return request<{ lookIds: string[] }>("/api/looks/generate", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -341,10 +358,95 @@ export async function generateLooks(input: GenerateLooksInput): Promise<{ lookId
   });
 }
 
-export async function patchLook(id: string, action: "accept" | "reject"): Promise<{ look: Look }> {
+export async function patchLook(
+  id: string,
+  action: "accept" | "reject" | "rescore",
+  extra?: { llmConfig?: LlmConfigPayload; lang?: "zh" | "en" },
+): Promise<{ look: Look }> {
+  const body: Record<string, unknown> = { action };
+  if (extra?.llmConfig) body.llmConfig = extra.llmConfig;
+  if (extra?.lang) body.lang = extra.lang;
   return request<{ look: Look }>(`/api/looks/${id}`, {
     method: "PATCH",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ action }),
+    body: JSON.stringify(body),
+  });
+}
+
+export interface RetryLookInput {
+  poseId?: string;
+  route?: TryOnRouteId;
+  provider: string;
+  model: string;
+  apiKey: string;
+  baseUrl?: string;
+  options?: Record<string, unknown>;
+  llmConfig?: LlmConfigPayload;
+  tryon?: TryonPayload;
+  lookPresetId?: string | null;
+  lock?: { face: boolean; garmentPattern: boolean };
+  lang?: "zh" | "en";
+}
+
+export async function retryLook(id: string, input: RetryLookInput): Promise<{ lookId: string }> {
+  const body: Record<string, unknown> = {
+    provider: input.provider,
+    model: input.model,
+    apiKey: input.apiKey,
+    options: input.options,
+  };
+  if (input.poseId) body.poseId = input.poseId;
+  if (input.route) body.route = input.route;
+  if (input.baseUrl) body.baseUrl = input.baseUrl;
+  if (input.llmConfig) body.llmConfig = input.llmConfig;
+  if (input.tryon) body.tryon = input.tryon;
+  if (input.lookPresetId) body.lookPresetId = input.lookPresetId;
+  if (input.lock) body.lock = input.lock;
+  if (input.lang) body.lang = input.lang;
+  return request<{ lookId: string }>(`/api/looks/${id}/retry`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
+export interface LookExportManifest {
+  garmentSet: { id: string; name: string };
+  looks: Array<{
+    id: string;
+    poseId: string;
+    status: string;
+    imageUrl: string | null;
+    absoluteFile: boolean;
+  }>;
+}
+
+export async function exportLooks(
+  garmentSetId: string,
+  status: "accepted" | "all" = "accepted",
+): Promise<LookExportManifest> {
+  const qs = new URLSearchParams({ garmentSetId, status });
+  return request<LookExportManifest>(`/api/looks/export?${qs.toString()}`);
+}
+
+export async function importLooksToProject(
+  projectId: string,
+  items: Array<{ lookId: string; shotId: number }>,
+): Promise<{ assets: unknown[] }> {
+  return request<{ assets: unknown[] }>(`/api/project/${projectId}/looks/import`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ looks: items }),
+  });
+}
+
+/** Highest overall among candidate/accepted looks; unscored rows sort last. */
+export function pickBestLookForPose(rows: readonly Look[]): Look | null {
+  const eligible = rows.filter((row) => row.status === "candidate" || row.status === "accepted");
+  if (eligible.length === 0) return null;
+  return eligible.reduce((best, cur) => {
+    const b = best.score?.overall ?? Number.NEGATIVE_INFINITY;
+    const c = cur.score?.overall ?? Number.NEGATIVE_INFINITY;
+    return c > b ? cur : best;
   });
 }

@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { composeRoute, getTryOnRoute, listTryOnRoutes, registerTryOnRoute } from "@/lib/tryon";
+import { composeRoute, fashnRoute, getTryOnRoute, listTryOnRoutes, registerTryOnRoute } from "@/lib/tryon";
 import type { TryOnRoute } from "@/lib/tryon/types";
 
 describe("试衣路线注册表", () => {
@@ -7,6 +7,13 @@ describe("试衣路线注册表", () => {
     expect(getTryOnRoute(undefined)).toBe(composeRoute);
     expect(getTryOnRoute("compose")).toBe(composeRoute);
     expect(getTryOnRoute("compose").id).toBe("compose");
+  });
+
+  it("vton 解析到 FASHN 路线", () => {
+    expect(getTryOnRoute("vton")).toBe(fashnRoute);
+    expect(getTryOnRoute("vton").id).toBe("vton");
+    expect(getTryOnRoute("vton").displayName).toEqual({ zh: "FASHN 试衣", en: "FASHN try-on" });
+    expect(listTryOnRoutes().map((r) => r.id)).toEqual(expect.arrayContaining(["compose", "vton"]));
   });
 
   it("未知 id 回退到 compose，且只 warn 一次", () => {
@@ -18,19 +25,19 @@ describe("试衣路线注册表", () => {
     warn.mockRestore();
   });
 
-  it("registerTryOnRoute 之后可以解析到自定义 vton 路线", () => {
-    const fakeVton: TryOnRoute = {
+  it("registerTryOnRoute 可以覆盖已注册路线", () => {
+    const fake: TryOnRoute = {
       id: "vton",
-      displayName: { zh: "精确试衣", en: "VTON" },
+      displayName: { zh: "占位", en: "stub" },
       supports: () => true,
       generateLook: async () => {
         throw new Error("not implemented");
       },
     };
-    expect(listTryOnRoutes().some((r) => r.id === "vton")).toBe(false);
-    registerTryOnRoute(fakeVton);
-    expect(getTryOnRoute("vton")).toBe(fakeVton);
-    expect(listTryOnRoutes().map((r) => r.id)).toContain("vton");
+    registerTryOnRoute(fake);
+    expect(getTryOnRoute("vton")).toBe(fake);
+    registerTryOnRoute(fashnRoute);
+    expect(getTryOnRoute("vton")).toBe(fashnRoute);
     expect(getTryOnRoute("compose")).toBe(composeRoute);
   });
 });

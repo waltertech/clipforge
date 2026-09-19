@@ -1,12 +1,14 @@
 /**
- * Try-on route registry. M1 ships only the compose route; later milestones
- * call `registerTryOnRoute` to add vton (FASHN) without changing callers.
+ * Try-on route registry. Compose is the default; FASHN registers as "vton".
+ * Unknown ids fall back to compose (with a one-shot warning).
  */
 import { composeRoute } from "./compose-route";
+import { fashnRoute } from "./fashn-route";
 import type { TryOnRoute } from "./types";
 
 const routes = new Map<string, TryOnRoute>();
 routes.set(composeRoute.id, composeRoute);
+routes.set(fashnRoute.id, fashnRoute);
 
 const warnedFallback = new Set<string>();
 
@@ -19,8 +21,7 @@ export function listTryOnRoutes(): TryOnRoute[] {
 }
 
 /**
- * Resolve a route by id. Unknown or not-yet-registered ids (e.g. "vton" in M1)
- * fall back to compose and warn once per id so a later agent can register it.
+ * Resolve a route by id. Unknown ids fall back to compose and warn once per id.
  */
 export function getTryOnRoute(id: string | undefined): TryOnRoute {
   if (id) {
@@ -34,4 +35,4 @@ export function getTryOnRoute(id: string | undefined): TryOnRoute {
   return composeRoute;
 }
 
-export { composeRoute };
+export { composeRoute, fashnRoute };

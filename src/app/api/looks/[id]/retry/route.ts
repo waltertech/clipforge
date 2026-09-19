@@ -1,7 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
+import { eq } from "drizzle-orm";
 import { getDb } from "@/lib/db";
 import { looks } from "@/lib/db/schema";
 import { apiError, errText } from "@/lib/api-error";
+import { getPosePreset, isPoseId } from "@/lib/pose-presets";
 import { fashnRoute, unsupportedFashnCategories } from "@/lib/tryon/fashn-route";
 import {
   generateLooksInBackground,
@@ -12,21 +14,28 @@ import {
   parseTryonBody,
   type LookJobConfig,
 } from "@/lib/tryon/run-look";
-import { getPosePreset, isPoseId } from "@/lib/pose-presets";
 import {
   DEFAULT_TRYON_ROUTE,
   MAX_GARMENTS_PER_LOOK,
-  MAX_POSES_PER_REQUEST,
   TRYON_ROUTE_IDS,
+  type LookCharacterSnapshot,
   type TryOnRouteId,
 } from "@/lib/tryon/types";
 
+const SAFE_ID = /^[a-zA-Z0-9-]+$/;
+
 /**
- * POST /api/looks/generate — insert one pending Look per pose, return 202 { lookIds },
- * then generate (and optionally score) in the background (concurrency 3).
+ * POST /api/looks/[id]/retry — clone the source Look into a NEW pending row
+ * (never overwrites) and run the same background generation + scoring as generate.
+ * 202 { lookId }
  */
-export async function POST(req: NextRequest) {
+export async function POST(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   try {
+    const { id } = await params;
+    if (!id || !SAFE_ID.test(id)) {
+      return apiError(req, "无效的 Look ID", "Invalid look id", 400);
+    }
+
     let body: Record<string, unknown>;
     try {
       body = await req.json();
@@ -34,38 +43,29 @@ export async function POST(req: NextRequest) {
       return apiError(req, "请求体不是有效 JSON", "Request body is not valid JSON", 400);
     }
 
-    const garmentSetId = typeof body.garmentSetId === "string" ? body.garmentSetId.trim() : "";
-    if (!garmentSetId) {
-      return apiError(req, "缺少 garmentSetId", "Missing garmentSetId", 400);
-    }
+    const db = getDb();
+    const [source] = await db.select().from(looks).where(eq(looks.id, id)).limit(1);
+    if (!source) return apiError(req, "Look 不存在", "Look not found", 404);
 
-    const character = parseCharacter(body.character);
+    const character: LookCharacterSnapshot | null = parseCharacter(source.characterSnapshot) ?? parseCharacter(body.character);
     if (!character) {
       return apiError(
         req,
-        "缺少有效的模特信息（需要 id、name、referenceImages）",
-        "Missing valid character snapshot (id, name, referenceImages required)",
+        "源 Look 缺少模特快照，无法重试",
+        "Source look has no character snapshot to retry with",
         400
       );
     }
 
-    if (!Array.isArray(body.poseIds) || body.poseIds.length < 1) {
-      return apiError(req, "请至少选择一个姿态", "Select at least one pose", 400);
+    let poseId = source.poseId;
+    if (body.poseId != null && body.poseId !== "") {
+      if (typeof body.poseId !== "string" || !isPoseId(body.poseId) || !getPosePreset(body.poseId)) {
+        return apiError(req, "未知的姿态 ID", "Unknown pose id", 400);
+      }
+      poseId = body.poseId;
     }
-    if (body.poseIds.length > MAX_POSES_PER_REQUEST) {
-      return apiError(
-        req,
-        `一次最多生成 ${MAX_POSES_PER_REQUEST} 个姿态`,
-        `At most ${MAX_POSES_PER_REQUEST} poses per request`,
-        400
-      );
-    }
-    if (!body.poseIds.every((id) => isPoseId(id))) {
-      return apiError(req, "包含未知的姿态 ID", "One or more pose ids are invalid", 400);
-    }
-    const poseIds = body.poseIds as string[];
 
-    let route: TryOnRouteId = DEFAULT_TRYON_ROUTE;
+    let route: TryOnRouteId = source.route === "vton" ? "vton" : DEFAULT_TRYON_ROUTE;
     if (body.route != null && body.route !== "") {
       if (typeof body.route !== "string" || !(TRYON_ROUTE_IDS as readonly string[]).includes(body.route)) {
         return apiError(req, "未知的试衣路线，仅支持 compose 或 vton", "Unknown try-on route; use compose or vton", 400);
@@ -74,7 +74,9 @@ export async function POST(req: NextRequest) {
     }
 
     const lookPresetId =
-      typeof body.lookPresetId === "string" && body.lookPresetId.trim() ? body.lookPresetId.trim() : undefined;
+      typeof body.lookPresetId === "string"
+        ? body.lookPresetId.trim() || undefined
+        : source.lookPresetId ?? undefined;
 
     const lock = parseLock(body.lock);
     const lang = body.lang === "en" || body.lang === "zh" ? body.lang : undefined;
@@ -103,16 +105,10 @@ export async function POST(req: NextRequest) {
         400
       );
     }
-    const baseUrl = typeof body.baseUrl === "string" ? body.baseUrl : "";
-    const options =
-      body.options && typeof body.options === "object" && !Array.isArray(body.options)
-        ? (body.options as Record<string, unknown>)
-        : {};
 
-    const loaded = await loadOrderedGarments(garmentSetId);
+    const loaded = await loadOrderedGarments(source.garmentSetId);
     if (!loaded) return apiError(req, "服装搭配不存在", "Garment set not found", 400);
-    const garmentIds = loaded.set.garmentIds ?? [];
-    if (garmentIds.length > MAX_GARMENTS_PER_LOOK) {
+    if ((loaded.set.garmentIds ?? []).length > MAX_GARMENTS_PER_LOOK) {
       return apiError(
         req,
         `单次 Look 最多 ${MAX_GARMENTS_PER_LOOK} 件服装`,
@@ -137,29 +133,29 @@ export async function POST(req: NextRequest) {
       }
     }
 
-    const db = getDb();
-    const inserted: { id: string; poseId: string }[] = [];
-    for (const poseId of poseIds) {
-      if (!getPosePreset(poseId)) {
-        return apiError(req, "包含未知的姿态 ID", "One or more pose ids are invalid", 400);
-      }
-      const [row] = await db
-        .insert(looks)
-        .values({
-          garmentSetId,
-          characterId: character.id,
-          characterSnapshot: character,
-          poseId,
-          lookPresetId: lookPresetId ?? null,
-          route,
-          status: "pending",
-        })
-        .returning({ id: looks.id, poseId: looks.poseId });
-      if (row) inserted.push(row);
+    const [row] = await db
+      .insert(looks)
+      .values({
+        garmentSetId: source.garmentSetId,
+        characterId: character.id,
+        characterSnapshot: character,
+        poseId,
+        lookPresetId: lookPresetId ?? null,
+        route,
+        status: "pending",
+      })
+      .returning({ id: looks.id, poseId: looks.poseId });
+    if (!row) {
+      return apiError(req, "无法创建重试任务", "Failed to create retry look", 500);
     }
 
+    const options =
+      body.options && typeof body.options === "object" && !Array.isArray(body.options)
+        ? (body.options as Record<string, unknown>)
+        : {};
+
     const job: LookJobConfig = {
-      garmentSetId,
+      garmentSetId: source.garmentSetId,
       character,
       lookPresetId,
       route,
@@ -168,21 +164,21 @@ export async function POST(req: NextRequest) {
       provider: provider || "fashn",
       model: model || "tryon-v1.6",
       apiKey: typeof body.apiKey === "string" ? body.apiKey : "",
-      baseUrl,
+      baseUrl: typeof body.baseUrl === "string" ? body.baseUrl : "",
       options,
       llmConfig,
       fashn: route === "vton" ? { apiKey: fashn.apiKey, baseUrl: fashn.baseUrl } : undefined,
     };
 
-    void generateLooksInBackground(inserted, job, loaded.garments).catch((err) => {
-      console.error("Look 后台生成失败:", err);
+    void generateLooksInBackground([row], job, loaded.garments).catch((err) => {
+      console.error("Look 重试后台生成失败:", err);
     });
 
-    return NextResponse.json({ lookIds: inserted.map((r) => r.id) }, { status: 202 });
+    return NextResponse.json({ lookId: row.id }, { status: 202 });
   } catch (error) {
-    console.error("创建 Look 生成任务失败:", error);
+    console.error("重试 Look 失败:", error);
     return NextResponse.json(
-      { error: error instanceof Error ? error.message : errText(req, "创建 Look 生成任务失败", "Failed to start look generation") },
+      { error: error instanceof Error ? error.message : errText(req, "重试 Look 失败", "Failed to retry look") },
       { status: 500 }
     );
   }
