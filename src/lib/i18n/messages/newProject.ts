@@ -183,6 +183,11 @@ export const newProject: NamespaceMessages = {
     adTplShotDemo: "演示镜",
     adTplShotProof: "背书镜",
     adTplShotCta: "转化镜",
+    adTplFashionBadge: "时装",
+    adTplFashionFilter: "时装",
+    adTplFromReference: "从对标视频生成",
+    adTplAiFashion: "时装模板",
+    adTplNeedsConfirm: "需要确认",
     templateUsedCount: "已用 {n} 次",
     // 脚本风格
     stepStyleTitle: "选择脚本风格",
@@ -380,6 +385,11 @@ export const newProject: NamespaceMessages = {
     adTplShotDemo: "Demo",
     adTplShotProof: "Social proof",
     adTplShotCta: "CTA",
+    adTplFashionBadge: "Fashion",
+    adTplFashionFilter: "Fashion",
+    adTplFromReference: "From reference video",
+    adTplAiFashion: "Fashion",
+    adTplNeedsConfirm: "Needs confirmation",
     templateUsedCount: "Used {n} times",
     // 脚本风格
     stepStyleTitle: "Choose a script style",

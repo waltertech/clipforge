@@ -23,6 +23,7 @@ import { materials } from "./materials";
 import { garments } from "./garments";
 import { looks } from "./looks";
 import { looksVideo } from "./looksVideo";
+import { fashionEditor } from "./fashionEditor";
 
 // 所有命名空间集中注册（新增页面时在此追加一行）
 const namespaces = {
@@ -50,6 +51,7 @@ const namespaces = {
   garments,
   looks,
   looksVideo,
+  fashionEditor,
 };
 
 /** messages[locale][namespace][key] = 翻译文本 */

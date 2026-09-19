@@ -28,6 +28,8 @@ import {
 } from "@/components/ui/select";
 import { useT, useLocale } from "@/lib/i18n";
 import { friendlyError } from "@/lib/friendly-error";
+import { FashionFieldsEditor, FashionKindToggle } from "@/components/fashion/fashion-fields-editor";
+import { ReferenceImportDialog } from "@/components/fashion/reference-import-dialog";
 
 // product category options (label changed to i18n key, converted via t() at render time)
 const categoryOptions = [
@@ -142,12 +144,13 @@ export default function NewProjectPage() {
   // injects the camera/look plan into script generation, and hands the compose recipe
   // to the video page via localStorage
   const [selectedAdTemplateId, setSelectedAdTemplateId] = useState<string>("");
-  const [adTemplateGroup, setAdTemplateGroup] = useState<AdTemplateGroupId | "all" | "mine">("all");
+  const [adTemplateGroup, setAdTemplateGroup] = useState<AdTemplateGroupId | "all" | "mine" | "fashion">("all");
   const [adTemplateQuery, setAdTemplateQuery] = useState("");
   // AI-generated custom template (one slot; lives in component state until project creation persists it)
   const [customAdTemplate, setCustomAdTemplate] = useState<AdTemplate | null>(null);
   const [aiTplLoading, setAiTplLoading] = useState(false);
   const [aiTplError, setAiTplError] = useState("");
+  const [aiTplFashion, setAiTplFashion] = useState(false);
   // user-owned templates (template economy): saved AI recipes + imported share files, DB-backed
   const [myTemplates, setMyTemplates] = useState<AdTemplate[]>([]);
   const [importOpen, setImportOpen] = useState(false);
@@ -161,6 +164,12 @@ export default function NewProjectPage() {
   const [editorDraft, setEditorDraft] = useState<AdTemplate | null>(null);
   const [editorSourceId, setEditorSourceId] = useState("");
   const [editorBusy, setEditorBusy] = useState(false);
+  const [editorSaveSource, setEditorSaveSource] = useState<"edit" | "reference">("edit");
+  const [editorNeedsConfirmation, setEditorNeedsConfirmation] = useState<string[]>([]);
+  const [referenceOpen, setReferenceOpen] = useState(false);
+  useEffect(() => {
+    if (category === "fashion") setAiTplFashion(true);
+  }, [category]);
   useEffect(() => {
     // best-effort: an empty "mine" list (fresh install / fetch failure) just hides the section
     fetch("/api/ad-template/mine")
@@ -275,6 +284,8 @@ export default function NewProjectPage() {
     // deep copy — the draft must never mutate the builtin library / store objects
     setEditorDraft(JSON.parse(JSON.stringify(tpl)) as AdTemplate);
     setEditorSourceId(isMine ? tpl.id : "");
+    setEditorSaveSource("edit");
+    setEditorNeedsConfirmation([]);
     setEditorOpen(true);
     setImportOpen(false);
     setMineNotice("");
@@ -291,7 +302,7 @@ export default function NewProjectPage() {
         body: JSON.stringify(
           editorSourceId
             ? { id: editorSourceId, template: editorDraft }
-            : { template: editorDraft, source: "edit" }
+            : { template: editorDraft, source: editorSaveSource }
         ),
       });
       const data = await res.json();
@@ -302,6 +313,8 @@ export default function NewProjectPage() {
       );
       setEditorOpen(false);
       setEditorDraft(null);
+      setEditorNeedsConfirmation([]);
+      setEditorSaveSource("edit");
       pickAdTemplate(tpl.id, tpl);
       if (Array.isArray(data.warnings) && data.warnings.length > 0) {
         setMineNotice(`${t("adTemplateImportWarn")}${data.warnings.join("、")}`);
@@ -326,6 +339,7 @@ export default function NewProjectPage() {
           category,
           sellingPoints,
           llmConfig: { baseUrl: llm.baseUrl, apiKey: llm.apiKey, model: llm.model },
+          ...(aiTplFashion ? { kind: "fashion" } : {}),
         }),
       });
       const data = await res.json();
@@ -1261,6 +1275,17 @@ export default function NewProjectPage() {
                     )}
                   </button>
                 ))}
+                <button
+                  onClick={() => setAdTemplateGroup("fashion")}
+                  className={`px-2.5 py-1 rounded-full text-xs border transition-all ${
+                    adTemplateGroup === "fashion"
+                      ? "border-primary bg-primary/10 text-primary font-medium"
+                      : "border-border/50 bg-muted/20 text-muted-foreground hover:border-primary/40"
+                  }`}
+                >
+                  {t("adTplFashionFilter")}
+                  <span className="ml-1 opacity-60">{listAdTemplates({ kind: "fashion" }).length}</span>
+                </button>
                 {/* user-owned templates get their own chip once any exist (template economy) */}
                 {myTemplates.length > 0 && (
                   <button
@@ -1290,6 +1315,20 @@ export default function NewProjectPage() {
                   className="px-2.5 py-1 rounded-full text-xs border border-primary/40 bg-primary/5 text-primary hover:border-primary disabled:opacity-40 disabled:cursor-not-allowed transition-all"
                 >
                   {aiTplLoading ? t("adTemplateAiLoading") : t("adTemplateAiButton")}
+                </button>
+                <label className="flex items-center gap-1 text-[11px] text-muted-foreground">
+                  <input
+                    type="checkbox"
+                    checked={aiTplFashion}
+                    onChange={(e) => setAiTplFashion(e.target.checked)}
+                  />
+                  {t("adTplAiFashion")}
+                </label>
+                <button
+                  onClick={() => { setReferenceOpen(true); setMineNotice(""); }}
+                  className="px-2.5 py-1 rounded-full text-xs border border-border/50 bg-muted/20 text-muted-foreground hover:border-primary/40 transition-all"
+                >
+                  {t("adTplFromReference")}
                 </button>
                 {/* recipes travel: import a shared .json, export the current pick */}
                 <button
@@ -1352,11 +1391,37 @@ export default function NewProjectPage() {
                 </div>
               )}
               {/* recipe editor — every select is fed from the same vocabularies the server clamps to */}
+              <ReferenceImportDialog
+                open={referenceOpen}
+                onOpenChange={setReferenceOpen}
+                llmConfig={{ baseUrl: llm.baseUrl, apiKey: llm.apiKey, model: llm.model, visionModel: llm.visionModel }}
+                onDraft={(tpl, meta) => {
+                  setEditorDraft(JSON.parse(JSON.stringify(tpl)) as AdTemplate);
+                  setEditorSourceId("");
+                  setEditorSaveSource("reference");
+                  setEditorNeedsConfirmation(meta.needsConfirmation ?? []);
+                  setEditorOpen(true);
+                  setReferenceOpen(false);
+                  setImportOpen(false);
+                  setMineNotice("");
+                }}
+              />
               {editorOpen && editorDraft && (
                 <div className="mb-3 p-3 rounded-lg border border-primary/30 bg-primary/[0.03] space-y-3">
                   <p className="text-xs font-medium text-primary">
                     {editorSourceId ? t("adTplEditorTitleEdit") : t("adTplEditorTitleFork")}
                   </p>
+                  {editorNeedsConfirmation.length > 0 && (
+                    <div className="rounded-md border border-amber-500/40 bg-amber-500/10 p-2 space-y-1">
+                      <p className="text-[11px] font-medium text-amber-700 dark:text-amber-400">{t("adTplNeedsConfirm")}</p>
+                      <ul className="list-disc pl-4 text-[11px] text-amber-800/90 dark:text-amber-300/90">
+                        {editorNeedsConfirmation.map((msg) => (
+                          <li key={msg}>{msg}</li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+                  <FashionKindToggle value={editorDraft} onChange={(next) => setEditorDraft(next)} />
                   <div className="grid grid-cols-[3.5rem_1fr_1fr] gap-2">
                     <input
                       value={editorDraft.emoji}
@@ -1547,6 +1612,9 @@ export default function NewProjectPage() {
                     rows={2}
                     className={EDITOR_INPUT_CLS}
                   />
+                  {editorDraft.kind === "fashion" && (
+                    <FashionFieldsEditor value={editorDraft} onChange={(next) => setEditorDraft(next)} />
+                  )}
                   <div className="flex gap-2">
                     <button
                       onClick={saveEditorTemplate}
@@ -1556,7 +1624,13 @@ export default function NewProjectPage() {
                       {editorSourceId ? t("adTplEditorSaveEdit") : t("adTplEditorSaveFork")}
                     </button>
                     <button
-                      onClick={() => { setEditorOpen(false); setEditorDraft(null); setMineNotice(""); }}
+                      onClick={() => {
+                        setEditorOpen(false);
+                        setEditorDraft(null);
+                        setEditorNeedsConfirmation([]);
+                        setEditorSaveSource("edit");
+                        setMineNotice("");
+                      }}
                       className="px-3 py-1 rounded-full text-xs border border-border/50 bg-muted/20 text-muted-foreground hover:border-primary/40 transition-all"
                     >
                       {t("adTemplateImportCancel")}
@@ -1582,7 +1656,7 @@ export default function NewProjectPage() {
                   <span className="text-[11px] text-muted-foreground mt-0.5">{t("adTemplateNoneDesc")}</span>
                 </button>
                 {/* the AI-generated custom recipe renders as a first-class card at the front */}
-                {customAdTemplate && adTemplateGroup !== "mine" && (
+                {customAdTemplate && adTemplateGroup !== "mine" && (adTemplateGroup !== "fashion" || customAdTemplate.kind === "fashion") && (
                   <button
                     onClick={() => pickAdTemplate(CUSTOM_AD_TEMPLATE_ID)}
                     className={`flex flex-col items-start p-3 rounded-lg border text-left transition-all ${
@@ -1594,6 +1668,11 @@ export default function NewProjectPage() {
                     <span className={`text-sm font-medium ${selectedAdTemplateId === CUSTOM_AD_TEMPLATE_ID ? "text-primary" : "text-foreground"}`}>
                       {customAdTemplate.emoji} {locale === "zh" ? customAdTemplate.name.zh : customAdTemplate.name.en}
                       <span className="ml-1 text-[10px] px-1 py-0.5 rounded bg-primary/15 text-primary align-middle">AI</span>
+                      {customAdTemplate.kind === "fashion" && (
+                        <span className="ml-1 text-[10px] px-1 py-0.5 rounded bg-primary/15 text-primary align-middle">
+                          {t("adTplFashionBadge")}
+                        </span>
+                      )}
                       {/* save-for-reuse chip (span, not button — cards are buttons already) */}
                       {!aiTplSaved && (
                         <span
@@ -1610,9 +1689,10 @@ export default function NewProjectPage() {
                   </button>
                 )}
                 {/* user-owned templates: shown under "all" and their own chip, searchable like builtins */}
-                {(adTemplateGroup === "all" || adTemplateGroup === "mine") &&
+                {(adTemplateGroup === "all" || adTemplateGroup === "mine" || adTemplateGroup === "fashion") &&
                   myTemplates
                     .filter((tpl) => {
+                      if (adTemplateGroup === "fashion" && tpl.kind !== "fashion") return false;
                       const q = adTemplateQuery.trim().toLowerCase();
                       if (!q) return true;
                       return `${tpl.name.zh} ${tpl.name.en} ${tpl.tagline.zh} ${tpl.tagline.en}`.toLowerCase().includes(q);
@@ -1632,6 +1712,11 @@ export default function NewProjectPage() {
                           <span className="ml-1 text-[10px] px-1 py-0.5 rounded bg-primary/15 text-primary align-middle">
                             {t("adTemplateMine")}
                           </span>
+                          {tpl.kind === "fashion" && (
+                            <span className="ml-1 text-[10px] px-1 py-0.5 rounded bg-primary/15 text-primary align-middle">
+                              {t("adTplFashionBadge")}
+                            </span>
+                          )}
                         </span>
                         <span className="text-[11px] text-muted-foreground mt-0.5 line-clamp-2">
                           {locale === "zh" ? tpl.tagline.zh : tpl.tagline.en}
@@ -1645,7 +1730,11 @@ export default function NewProjectPage() {
                         </span>
                       </button>
                     ))}
-                {adTemplateGroup !== "mine" && listAdTemplates({ group: adTemplateGroup, category, query: adTemplateQuery }).map((tpl) => (
+                {adTemplateGroup !== "mine" && listAdTemplates({
+                  ...(adTemplateGroup === "fashion"
+                    ? { kind: "fashion" as const, query: adTemplateQuery }
+                    : { group: adTemplateGroup, category, query: adTemplateQuery }),
+                }).map((tpl) => (
                   <button
                     key={tpl.id}
                     onClick={() => pickAdTemplate(tpl.id)}
@@ -1657,6 +1746,11 @@ export default function NewProjectPage() {
                   >
                     <span className={`text-sm font-medium ${selectedAdTemplateId === tpl.id ? "text-primary" : "text-foreground"}`}>
                       {tpl.emoji} {locale === "zh" ? tpl.name.zh : tpl.name.en}
+                      {tpl.kind === "fashion" && (
+                        <span className="ml-1 text-[10px] px-1 py-0.5 rounded bg-primary/15 text-primary align-middle">
+                          {t("adTplFashionBadge")}
+                        </span>
+                      )}
                       {category && tpl.goodFor?.includes(category as AdTemplateCategory) && (
                         <span className="ml-1 text-[10px] px-1 py-0.5 rounded bg-primary/15 text-primary align-middle">
                           {t("adTemplateGoodMatch")}
