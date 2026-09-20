@@ -157,7 +157,7 @@ export interface WordAnchor {
 | --- | --- |
 | 镜头数 | `poseSequence.length`；> 9 时按相邻时长合并到 9 |
 | 每镜 `pose`（自由文本） | 用向量或关键词匹配到最近的 pose id；置信度低时用 `front_stand` 并在编辑器标黄 |
-| 每镜 `camera` / `motion` | `findPresetByPrompt` 命中 camera id，否则留空让用户选 |
+| 每镜 `camera` / `motion` | 先 `findPresetByPrompt` 整句命中，再按名称 / 关键词（`matchCameraId`）落到 camera id；仍无命中则留空并列入「需要确认」 |
 | 每镜时长 | `shotSeconds`，四舍五入到 0.5 |
 | 每镜 `role` | `shotRoles` |
 | 有无口播、是否出镜 | `scriptPattern` |

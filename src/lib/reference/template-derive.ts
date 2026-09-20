@@ -13,7 +13,7 @@ import {
   type WordAnchor,
   type WordAnchorElement,
 } from "@/lib/ad-templates";
-import { findPresetByPrompt, getCameraPreset } from "@/lib/camera-presets";
+import { CAMERA_PRESETS, findPresetByPrompt, getCameraPreset } from "@/lib/camera-presets";
 import { isCaptionPreset, type CaptionPresetId } from "@/lib/caption-presets";
 import { getPosePreset, POSE_PRESETS } from "@/lib/pose-presets";
 import type { Shot } from "@/lib/db/schema";
@@ -65,6 +65,66 @@ export function matchPoseId(text: string): string | undefined {
   if (/\bfront\b/i.test(t)) return "front_stand";
   if (/\bside\b/i.test(t)) return "side";
   if (/\bback\b/i.test(t)) return "back";
+  return undefined;
+}
+
+/**
+ * Vision-LLM camera text → CAMERA_PRESETS id.
+ * findPresetByPrompt is exact-sentence only (UI "is a preset applied?"); readers
+ * almost never quote the full preset, so we also match names and distinctive keywords.
+ */
+const CAMERA_KEYWORDS: Array<{ id: string; keywords: string[] }> = [
+  { id: "crash_push", keywords: ["急速推近", "冲击力强", "crash in", "crash push"] },
+  { id: "dolly_zoom", keywords: ["希区柯克", "dolly zoom"] },
+  { id: "push_then_hold", keywords: ["推近后", "定住", "then hold", "稳定收尾"] },
+  { id: "macro_glide", keywords: ["微距", "滑移", "macro glide", "macro close-up"] },
+  { id: "follow_track", keywords: ["跟随人物", "跟随主体", "跟随镜头", "follow track", "follows the subject"] },
+  { id: "orbit_slow", keywords: ["环绕半圈", "环绕展示", "slow orbit"] },
+  { id: "body_orbit", keywords: ["贴身环走", "环走"] },
+  { id: "lazy_susan", keywords: ["转台", "turntable"] },
+  { id: "arc_quarter", keywords: ["弧形环移", "quarter circle"] },
+  { id: "lateral_track", keywords: ["横移", "lateral track"] },
+  { id: "whip_pan", keywords: ["甩镜", "whip pan"] },
+  { id: "crane_up", keywords: ["升镜", "cranes up"] },
+  { id: "crane_down_close", keywords: ["降镜", "cranes down"] },
+  { id: "overhead_top", keywords: ["俯拍下降", "top-down", "overhead"] },
+  { id: "handheld_real", keywords: ["手持实拍", "handheld sway"] },
+  { id: "pov_walk", keywords: ["第一视角", "第一人称", "pov walk"] },
+  { id: "hero_rise", keywords: ["英雄仰拍", "仰拍", "hero shot"] },
+  { id: "locked_on", keywords: ["LOCKED-ON", "锁定跟拍"] },
+  { id: "fpv_dive", keywords: ["FPV", "俯冲"] },
+  { id: "focus_shift", keywords: ["焦点转移", "rack focus"] },
+  { id: "pull_reveal", keywords: ["拉远", "pull back", "pulls back"] },
+  { id: "slow_push", keywords: ["缓慢推近", "缓慢平稳", "slow push"] },
+  { id: "follow_track", keywords: ["跟随", "follow"] },
+];
+
+export function matchCameraId(text: string): string | undefined {
+  const t = text.trim();
+  if (!t) return undefined;
+  const exact = findPresetByPrompt(t);
+  if (exact) return exact.id;
+  if (getCameraPreset(t)) return t;
+
+  const lower = t.toLowerCase();
+  for (const p of CAMERA_PRESETS) {
+    if (t.includes(p.name.zh) || lower.includes(p.name.en.toLowerCase())) return p.id;
+  }
+  for (const rule of CAMERA_KEYWORDS) {
+    if (rule.keywords.some((k) => (/[a-z]/i.test(k) ? lower.includes(k.toLowerCase()) : t.includes(k)))) {
+      return rule.id;
+    }
+  }
+  if (t.length >= 6) {
+    const hits = CAMERA_PRESETS.filter(
+      (p) => p.prompt.zh.includes(t) || p.prompt.en.toLowerCase().includes(lower),
+    );
+    if (hits.length === 1) return hits[0].id;
+    if (hits.length > 1) {
+      hits.sort((a, b) => a.prompt.zh.length - b.prompt.zh.length);
+      return hits[0].id;
+    }
+  }
   return undefined;
 }
 
@@ -177,7 +237,7 @@ export function deriveFashionTemplate(
     const role = roles[i] ?? "demo";
     const hit =
       (s.cameraPresetId && getCameraPreset(s.cameraPresetId) ? s.cameraPresetId : undefined) ??
-      findPresetByPrompt(s.cameraText)?.id;
+      matchCameraId(s.cameraText || "");
     if (hit) {
       cameraPlan[role] = hit;
     } else {

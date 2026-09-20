@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { sanitizeCustomAdTemplate, isFashionTemplate } from "@/lib/ad-templates";
 import { findPresetByPrompt } from "@/lib/camera-presets";
-import { deriveFashionTemplate, matchPoseId, classifyOnScreenText } from "@/lib/reference/template-derive";
+import { deriveFashionTemplate, matchPoseId, matchCameraId, classifyOnScreenText } from "@/lib/reference/template-derive";
 import type { ReferenceShotRead } from "@/lib/reference/types";
 
 const CRASH_PUSH_ZH = findPresetByPrompt("镜头急速推近主体，冲击力强，开场抓眼")?.id;
@@ -58,6 +58,15 @@ describe("matchPoseId / classifyOnScreenText", () => {
     expect(matchPoseId("侧身")).toBe("side");
   });
 
+  it("camera 自由文本命中预设（不必整句）", () => {
+    expect(matchCameraId("镜头急速推近主体")).toBe("crash_push");
+    expect(matchCameraId("镜头跟随人物移动")).toBe("follow_track");
+    expect(matchCameraId("微距缓慢滑移")).toBe("macro_glide");
+    expect(matchCameraId("缓慢推近")).toBe("slow_push");
+    expect(matchCameraId("镜头随便动一动")).toBeUndefined();
+    expect(matchCameraId("")).toBeUndefined();
+  });
+
   it("¥ / price text → price_card", () => {
     expect(classifyOnScreenText("限时 ¥199")).toBe("price_card");
     expect(classifyOnScreenText("NIKE")).toBe("brand_tag");
@@ -110,6 +119,41 @@ describe("deriveFashionTemplate", () => {
     ];
     const { draft } = deriveFashionTemplate(reads, meta);
     expect(draft.cameraPlan.hook).toBe("crash_push");
+  });
+
+  it("camera 非整句描述仍写入 cameraPlan，不进需要确认", () => {
+    const reads = [
+      shot({
+        index: 0,
+        start: 0,
+        end: 3,
+        role: "hook",
+        poseText: "正面站姿",
+        cameraText: "镜头急速推近主体",
+      }),
+      shot({
+        index: 1,
+        start: 3,
+        end: 6,
+        role: "demo",
+        poseText: "走向镜头",
+        cameraText: "镜头跟随人物移动",
+      }),
+      shot({
+        index: 2,
+        start: 6,
+        end: 9,
+        role: "cta",
+        poseText: "四分之三",
+        cameraText: "微距缓慢滑移",
+      }),
+    ];
+    const { draft, needsConfirmation } = deriveFashionTemplate(reads, meta);
+    expect(draft.cameraPlan.hook).toBe("crash_push");
+    expect(draft.cameraPlan.demo).toBe("follow_track");
+    expect(draft.fashion?.poseSequence).toEqual(["front_stand", "walk_toward", "three_quarter"]);
+    expect(needsConfirmation.filter((x) => x.includes("camera"))).toEqual([]);
+    expect(needsConfirmation.filter((x) => x.includes("pose"))).toEqual([]);
   });
 
   it("¥ on-screen text → price_card payload is the category word, not the original copy", () => {

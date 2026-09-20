@@ -2,6 +2,8 @@
 
 每一条可独立提 PR。顺序为 M0 → M1 → M2 → M3 → M4；M2 与 M3 可并行；M5 上线前做。每个阶段的测试项见 [05-test-plan.md](05-test-plan.md)。
 
+**状态（2026-09-20）**：M0–M4 已在本分支落地。用户向说明见 [../fashion-workbench-guide.md](../fashion-workbench-guide.md)。M5（计费、多用户、FASHN 自托管、合规提示、CI e2e）未做。已知缺口：对标视频服务端 ASR 未接线（`transcript` 恒为 null）；Look 导出是 JSON manifest，不是 zip。
+
 标记：`[lib]` 纯逻辑，`[db]` schema 与迁移，`[api]` 路由，`[ui]` 页面，`[skill]` MCP / CLI / SKILL，`[docs]` 文档。
 
 ## M0 地基（纯数据 + schema，无 UI）
