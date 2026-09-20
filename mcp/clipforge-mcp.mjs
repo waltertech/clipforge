@@ -12,7 +12,14 @@
  *   CLIPFORGE_LLM_BASE_URL LLM endpoint (OpenAI-compatible, e.g. https://api.atlascloud.ai/v1)
  *   CLIPFORGE_LLM_API_KEY  LLM key (required for script generation; omitting it gives a clear prompt in create_video / generate_script)
  *   CLIPFORGE_LLM_MODEL    LLM model name (e.g. deepseek-ai/deepseek-v4-pro)
+ *   CLIPFORGE_IMAGE_PROVIDER / CLIPFORGE_IMAGE_MODEL / CLIPFORGE_IMAGE_API_KEY / CLIPFORGE_IMAGE_BASE_URL
+ *                         compose-route Look generation (image provider)
+ *   CLIPFORGE_FASHN_API_KEY / CLIPFORGE_FASHN_BASE_URL
+ *                         vton-route Look generation (FASHN try-on)
  */
+import { readFileSync } from "fs";
+import { basename, resolve } from "path";
+import { fileURLToPath } from "url";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import {
@@ -25,6 +32,16 @@ const LLM = {
   baseUrl: process.env.CLIPFORGE_LLM_BASE_URL || "",
   apiKey: process.env.CLIPFORGE_LLM_API_KEY || "",
   model: process.env.CLIPFORGE_LLM_MODEL || "",
+};
+const IMAGE = {
+  provider: process.env.CLIPFORGE_IMAGE_PROVIDER || "",
+  model: process.env.CLIPFORGE_IMAGE_MODEL || "",
+  apiKey: process.env.CLIPFORGE_IMAGE_API_KEY || "",
+  baseUrl: process.env.CLIPFORGE_IMAGE_BASE_URL || "",
+};
+const FASHN = {
+  apiKey: process.env.CLIPFORGE_FASHN_API_KEY || "",
+  baseUrl: process.env.CLIPFORGE_FASHN_BASE_URL || "",
 };
 
 // Free stock source keys (optional): when provided, adds high-quality Pexels/Pixabay video; without them, keyless Wikimedia video + Openverse images are still available
@@ -160,13 +177,14 @@ const TRANSCRIPT_PLAN_PROP = {
 async function api(path, { method = "GET", body, timeoutMs = 600000 } = {}) {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+  const isForm = typeof FormData !== "undefined" && body instanceof FormData;
   let res;
   let text;
   try {
     res = await fetch(`${BASE_URL}${path}`, {
       method,
-      headers: body ? { "Content-Type": "application/json" } : undefined,
-      body: body ? JSON.stringify(body) : undefined,
+      headers: body && !isForm ? { "Content-Type": "application/json" } : undefined,
+      body: isForm ? body : body ? JSON.stringify(body) : undefined,
       signal: ctrl.signal,
     });
     // Reading the body must also be within the timeout guard: fetch only resolves when response headers arrive; the timer must stay active to abort a stalled body read
@@ -187,6 +205,7 @@ async function api(path, { method = "GET", body, timeoutMs = 600000 } = {}) {
     const msg = data?.error || data?.raw || `HTTP ${res.status}`;
     const err = new Error(msg);
     err.payload = data;
+    err.status = res.status;
     throw err;
   }
   return data;
@@ -229,6 +248,187 @@ function absVideoUrl(composition) {
 function ok(textObj) {
   const text = typeof textObj === "string" ? textObj : JSON.stringify(textObj, null, 2);
   return { content: [{ type: "text", text }] };
+}
+
+const GARMENT_CATEGORIES = ["tops", "bottoms", "one-pieces", "outerwear", "shoes", "accessory"];
+const GARMENT_VIEWS = ["flat", "on-model"];
+const TRYON_ROUTES = ["compose", "vton"];
+
+/** Keep in sync with src/lib/pose-presets.ts (POSE_PRESETS). */
+const FASHION_POSE_PRESETS = [
+  { id: "front_stand", name: { zh: "正面站姿", en: "Front Stand" }, framing: "full", excludeCategories: [] },
+  { id: "three_quarter", name: { zh: "四分之三侧身", en: "Three-Quarter" }, framing: "full", excludeCategories: [] },
+  { id: "side", name: { zh: "侧面", en: "Side Profile" }, framing: "full", excludeCategories: [] },
+  { id: "back", name: { zh: "背面", en: "Back View" }, framing: "full", excludeCategories: [] },
+  { id: "walk_toward", name: { zh: "走向镜头", en: "Walk Toward" }, framing: "full", excludeCategories: [] },
+  { id: "hands_pocket", name: { zh: "插兜半身", en: "Hands in Pockets" }, framing: "half", excludeCategories: ["shoes"] },
+  { id: "seated", name: { zh: "坐姿", en: "Seated" }, framing: "full", excludeCategories: [] },
+  { id: "detail_torso", name: { zh: "上身细节", en: "Torso Detail" }, framing: "detail", excludeCategories: ["shoes", "bottoms"] },
+];
+
+/** Keep in sync with src/lib/ad-templates.ts entries where kind === "fashion". */
+const FASHION_BUILTIN_TEMPLATES = [
+  { id: "runway_walk", name: { zh: "走秀", en: "Runway Walk" }, kind: "fashion", poseSequence: ["front_stand", "walk_toward", "three_quarter", "back"] },
+  { id: "mirror_turn", name: { zh: "镜前转身", en: "Mirror Turn" }, kind: "fashion", poseSequence: ["front_stand", "side", "back", "front_stand"] },
+  { id: "ootd_talk", name: { zh: "试穿口播", en: "Try-On Talk" }, kind: "fashion", poseSequence: ["front_stand", "detail_torso", "three_quarter", "front_stand"] },
+  { id: "detail_macro", name: { zh: "面料细节", en: "Fabric Detail" }, kind: "fashion", poseSequence: ["detail_torso", "hands_pocket", "three_quarter"] },
+];
+
+const CHARACTER_PROP = {
+  type: "object",
+  description:
+    "主持人快照。主持人不在服务端（浏览器 localStorage），没有 clipforge_list_characters；请内联传入。id 可自拟稳定字符串（如姓名 slug）。",
+  properties: {
+    id: { type: "string", description: "稳定 id，可自拟（如 ada / 姓名 slug）" },
+    name: { type: "string", description: "主持人显示名" },
+    appearance: { type: "string", description: "外貌描述（无定妆图时的文字锚点）" },
+    referenceImages: { type: "array", items: { type: "string" }, description: "定妆图 / 参考图 URL 数组；没有则传 []。服务端需要该字段为数组" },
+  },
+  required: ["id", "name"],
+};
+
+function slugId(name) {
+  return String(name || "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/gi, "-")
+    .replace(/^-+|-+$/g, "") || "presenter";
+}
+
+function optionalLlm() {
+  if (!LLM.baseUrl || !LLM.model) return undefined;
+  return { baseUrl: LLM.baseUrl, apiKey: LLM.apiKey || "", model: LLM.model };
+}
+
+function estimateLookCalls({ route, poses, garments, scoring }) {
+  const r = route === "vton" ? "vton" : "compose";
+  const poseN = Math.max(0, Number(poses) || 0);
+  const garmentN = Math.max(0, Number(garments) || 0);
+  return {
+    poses: poseN,
+    garments: garmentN,
+    calls: {
+      image: r === "compose" ? poseN : 0,
+      tryon: r === "vton" ? poseN * garmentN : 0,
+      vision: scoring ? poseN : 0,
+    },
+  };
+}
+
+function absMediaUrl(path) {
+  if (!path) return null;
+  if (/^https?:\/\//i.test(path) || path.startsWith("data:")) return path;
+  return `${BASE_URL}${path}`;
+}
+
+function mapLook(l) {
+  return {
+    id: l.id,
+    garmentSetId: l.garmentSetId,
+    poseId: l.poseId,
+    status: l.status,
+    score: l.score ?? null,
+    imageUrl: l.imageUrl ? absMediaUrl(l.imageUrl) : null,
+    error: l.error ?? null,
+    route: l.route,
+    lookPresetId: l.lookPresetId ?? null,
+  };
+}
+
+function characterFromArgs(args, { required = true } = {}) {
+  const c = args.character && typeof args.character === "object" ? args.character : null;
+  if (!c) {
+    if (!required) return null;
+    throw new Error("character 必填：{ id, name, appearance?, referenceImages? }（主持人不在服务端，请内联传入）");
+  }
+  const name = String(c.name || "").trim();
+  if (!name) throw new Error("character.name 不能为空");
+  const id = String(c.id || "").trim() || slugId(name);
+  const referenceImages = Array.isArray(c.referenceImages)
+    ? c.referenceImages.filter((u) => typeof u === "string" && u.length > 0)
+    : [];
+  return {
+    id,
+    name,
+    ...(typeof c.appearance === "string" ? { appearance: c.appearance } : {}),
+    referenceImages,
+  };
+}
+
+function imageJobFields(route) {
+  if (route === "vton") {
+    if (!FASHN.apiKey) {
+      throw new Error("vton 路线需要 CLIPFORGE_FASHN_API_KEY（可选 CLIPFORGE_FASHN_BASE_URL）。本次为付费试衣调用。");
+    }
+    return {
+      provider: IMAGE.provider || "fashn",
+      model: IMAGE.model || "tryon-v1.6",
+      apiKey: IMAGE.apiKey || "",
+      baseUrl: IMAGE.baseUrl || "",
+      tryon: { apiKey: FASHN.apiKey, ...(FASHN.baseUrl ? { baseUrl: FASHN.baseUrl } : {}) },
+    };
+  }
+  if (!IMAGE.provider || !IMAGE.model || !IMAGE.apiKey) {
+    throw new Error(
+      "compose 路线需要 CLIPFORGE_IMAGE_PROVIDER、CLIPFORGE_IMAGE_MODEL、CLIPFORGE_IMAGE_API_KEY（可选 CLIPFORGE_IMAGE_BASE_URL）。本次为付费生图调用。",
+    );
+  }
+  return { provider: IMAGE.provider, model: IMAGE.model, apiKey: IMAGE.apiKey, baseUrl: IMAGE.baseUrl || "" };
+}
+
+function fileParts(filePath) {
+  const path = String(filePath || "").trim();
+  if (!path) throw new Error("filePath 不能为空");
+  let buf;
+  try {
+    buf = readFileSync(path);
+  } catch (e) {
+    throw new Error(`读不了本地文件：${path}（${e?.message || e}）`);
+  }
+  const name = basename(path).replace(/[/\\]/g, "") || "upload.bin";
+  const ext = name.includes(".") ? name.split(".").pop().toLowerCase() : "";
+  const mime =
+    ext === "jpg" || ext === "jpeg"
+      ? "image/jpeg"
+      : ext === "png"
+        ? "image/png"
+        : ext === "webp"
+          ? "image/webp"
+          : ext === "mp4"
+            ? "video/mp4"
+            : ext === "webm"
+              ? "video/webm"
+              : ext === "mov"
+                ? "video/quicktime"
+                : "application/octet-stream";
+  return { blob: new Blob([buf], { type: mime }), name, mime };
+}
+
+async function garmentSetById(garmentSetId) {
+  const { sets } = await api("/api/garment-sets");
+  return (sets ?? []).find((s) => s.id === garmentSetId) || null;
+}
+
+async function pollLooks(garmentSetId, lookIds, { timeoutMs = 360000, intervalMs = 2500 } = {}) {
+  const want = new Set(lookIds);
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const { looks } = await api(`/api/looks?garmentSetId=${encodeURIComponent(garmentSetId)}`);
+    const mine = (looks ?? []).filter((l) => want.has(l.id));
+    const busy = mine.some((l) => l.status === "pending" || l.status === "generating");
+    if (!busy && mine.length >= lookIds.length) return mine;
+    if (Date.now() > deadline) throw new Error("Look 生成超时（约 6 分钟），可稍后用 clipforge_get_looks 再查结果");
+    await new Promise((r) => setTimeout(r, intervalMs));
+  }
+}
+
+async function pollReference(referenceId, { timeoutMs = 360000, intervalMs = 2500 } = {}) {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const job = await api(`/api/reference/${encodeURIComponent(referenceId)}`);
+    if (job.stage === "done" || job.stage === "failed") return job;
+    if (Date.now() > deadline) throw new Error("对标任务超时（约 6 分钟），可稍后用 clipforge_get_reference 再查");
+    await new Promise((r) => setTimeout(r, intervalMs));
+  }
 }
 
 // ---- Tool definitions (JSON Schema, no zod required) ----
@@ -689,6 +889,180 @@ const TOOLS = [
         theme: { type: "string", enum: ["night", "warm", "mint", "mono", "rose"], description: "卡片主题色，默认 night" },
       },
       required: ["projectId"],
+    },
+  },
+  {
+    name: "clipforge_list_garments",
+    description: "列出已上传的服装。只读，不需要 LLM。可用 category / query 过滤。",
+    inputSchema: {
+      type: "object",
+      properties: {
+        category: { type: "string", enum: GARMENT_CATEGORIES, description: "服装类目" },
+        query: { type: "string", description: "按名称 / 备注 / 色标签搜索" },
+      },
+    },
+  },
+  {
+    name: "clipforge_upload_garment",
+    description: "上传一件服装参考图到 /api/garments（multipart）。只走 API，不要写数据目录。需要本地 filePath。",
+    inputSchema: {
+      type: "object",
+      properties: {
+        filePath: { type: "string", description: "正面图本地路径（JPEG / PNG / WebP，必填）" },
+        name: { type: "string", description: "服装名称" },
+        category: { type: "string", enum: GARMENT_CATEGORIES, description: "类目" },
+        view: { type: "string", enum: GARMENT_VIEWS, description: "拍摄视角，默认 flat" },
+        backFilePath: { type: "string", description: "背面图本地路径（可选）" },
+        notes: { type: "string", description: "面料/版型备注，模型必须保留这些外观" },
+        colorTags: { type: "array", items: { type: "string" }, description: "色标签" },
+      },
+      required: ["filePath", "name", "category"],
+    },
+  },
+  {
+    name: "clipforge_create_garment_set",
+    description: "创建一套搭配。garmentIds 顺序为内到外。characterId 仅为可选标签（主持人仍需在生成 Look 时内联传入）。",
+    inputSchema: {
+      type: "object",
+      properties: {
+        name: { type: "string", description: "搭配名称" },
+        garmentIds: { type: "array", items: { type: "string" }, description: "服装 id，1–5 件，顺序内到外" },
+        characterId: { type: "string", description: "可选：关联的主持人 id 标签" },
+      },
+      required: ["name", "garmentIds"],
+    },
+  },
+  {
+    name: "clipforge_list_poses",
+    description: "列出时装 Look 姿态预设（静态表，与 pose-presets 同步）。只读。可按服装类目过滤掉无法展示该类目的姿态。",
+    inputSchema: {
+      type: "object",
+      properties: {
+        categories: { type: "array", items: { type: "string", enum: GARMENT_CATEGORIES }, description: "要展示的服装类目；有 exclude 的姿态会被去掉" },
+      },
+    },
+  },
+  {
+    name: "clipforge_generate_looks",
+    description:
+      "为搭配生成多姿态模特 Look。付费：compose 每姿态 1 次生图，vton 每姿态×每件服装 1 次试衣，配置了 LLM 时每 Look 再加 1 次视觉打分。结果含 estimatedCost: { poses, garments, calls }。提交后默认轮询至无 pending/generating（最长约 6 分钟）；wait:false 立即返回 lookIds。主持人不在服务端，必须内联 character。",
+    inputSchema: {
+      type: "object",
+      properties: {
+        garmentSetId: { type: "string", description: "搭配 id（clipforge_create_garment_set 返回）" },
+        character: CHARACTER_PROP,
+        poseIds: { type: "array", items: { type: "string" }, description: "姿态 id，来自 clipforge_list_poses，至少 1 个" },
+        lookPresetId: { type: "string", description: "光线/背景 look 预设 id（可选）" },
+        route: { type: "string", enum: TRYON_ROUTES, description: "compose（默认，多参考生图）或 vton（FASHN 逐件试衣）" },
+        lock: {
+          type: "object",
+          description: "锁定项；garmentPattern 应保持 true",
+          properties: {
+            face: { type: "boolean" },
+            garmentPattern: { type: "boolean" },
+          },
+        },
+        wait: {
+          type: "boolean",
+          description: "默认 true=轮询到完成。false=立即返回 lookIds，再用 clipforge_get_looks 轮询。",
+        },
+      },
+      required: ["garmentSetId", "character", "poseIds"],
+    },
+  },
+  {
+    name: "clipforge_get_looks",
+    description: "列出某搭配的 Looks（status / score / imageUrl）。只读。用于轮询 clipforge_generate_looks 或取回已生成结果。",
+    inputSchema: {
+      type: "object",
+      properties: {
+        garmentSetId: { type: "string", description: "搭配 id" },
+        status: { type: "string", description: "可选状态过滤（pending/generating/candidate/accepted/rejected/failed）" },
+      },
+      required: ["garmentSetId"],
+    },
+  },
+  {
+    name: "clipforge_accept_look",
+    description: "接受一张 Look。同姿态的旧 accepted 会自动降为 candidate。接受是人的决定：未获用户授权时不要接受 score.garment < 3 的结果。",
+    inputSchema: {
+      type: "object",
+      properties: { lookId: { type: "string", description: "Look id" } },
+      required: ["lookId"],
+    },
+  },
+  {
+    name: "clipforge_retry_look",
+    description:
+      "按源 Look 新建一行再生成（不覆盖原图）。付费：与 generate_looks 相同的生图/试衣计费；返回 estimatedCost。可换 poseId 或 route:\"vton\"。",
+    inputSchema: {
+      type: "object",
+      properties: {
+        lookId: { type: "string", description: "源 Look id" },
+        poseId: { type: "string", description: "可选：换成另一个姿态" },
+        route: { type: "string", enum: TRYON_ROUTES, description: "可选：换成 compose 或 vton" },
+        lookPresetId: { type: "string", description: "可选：换成另一个 look 预设" },
+        wait: { type: "boolean", description: "默认 false=立即返回新 lookId；true=轮询完成" },
+      },
+      required: ["lookId"],
+    },
+  },
+  {
+    name: "clipforge_list_fashion_templates",
+    description: "列出时装模板：内置 runway_walk / mirror_turn / ootd_talk / detail_macro，加上「我的模板」中 kind=fashion 的条目。只读。",
+    inputSchema: {
+      type: "object",
+      properties: { query: { type: "string", description: "按 id / 中英文名过滤" } },
+    },
+  },
+  {
+    name: "clipforge_fashion_video",
+    description:
+      "用已接受的 Looks + 时装模板建项目（POST /api/project/from-look）。不在此处合成成片——成功后用 clipforge_compose 继续。模板缺姿态时 409，返回 missingPoses，不要当成功。后续 compose 为付费视频调用。",
+    inputSchema: {
+      type: "object",
+      properties: {
+        garmentSetId: { type: "string", description: "搭配 id" },
+        templateId: { type: "string", description: "时装模板 id（内置或我的模板）" },
+        character: CHARACTER_PROP,
+        name: { type: "string", description: "项目名称（可选）" },
+        lang: { type: "string", enum: ["zh", "en"], description: "文案语言" },
+      },
+      required: ["garmentSetId", "templateId", "character"],
+    },
+  },
+  {
+    name: "clipforge_derive_template",
+    description:
+      "从对标视频提取时装模板结构（镜头数/节奏/姿态/运镜/字幕/词锚点），不复用对方成片、音频或文案。付费：视觉 LLM 流水线。传本地 videoPath 或 http(s) url。默认轮询至 done/failed；wait:false 立即返回 referenceId。结果含 estimatedCost。",
+    inputSchema: {
+      type: "object",
+      properties: {
+        videoPath: { type: "string", description: "本地视频路径（MP4 / WebM / MOV）" },
+        url: { type: "string", description: "公开视频 URL" },
+        wait: { type: "boolean", description: "默认 true=等到 draft；false=立即返回 referenceId，用 clipforge_get_reference 轮询" },
+      },
+    },
+  },
+  {
+    name: "clipforge_get_reference",
+    description: "查询对标任务状态。返回 stage / draft / needsConfirmation。只读。",
+    inputSchema: {
+      type: "object",
+      properties: { referenceId: { type: "string", description: "clipforge_derive_template 返回的 id" } },
+      required: ["referenceId"],
+    },
+  },
+  {
+    name: "clipforge_save_template",
+    description: "把模板 JSON 存进「我的模板」。服务端会 sanitize 并做广告法检查；校验失败不要交给用户。source 为 reference（对标衍生）或 edit（手改）。",
+    inputSchema: {
+      type: "object",
+      properties: {
+        template: { type: "object", description: "AdTemplate JSON（含 fashion 字段）" },
+        source: { type: "string", enum: ["reference", "edit"], description: "来源，默认 edit" },
+      },
+      required: ["template"],
     },
   },
 ];
@@ -1363,6 +1737,298 @@ async function handleCarousel(args) {
   return ok({ ok: true, projectId, count: res.count, cards: (res.cards || []).map((c) => `${BASE_URL}${c}`) });
 }
 
+async function handleListGarments(args) {
+  const params = new URLSearchParams();
+  if (typeof args.category === "string" && GARMENT_CATEGORIES.includes(args.category)) params.set("category", args.category);
+  const q = typeof args.query === "string" ? args.query.trim() : "";
+  if (q) params.set("q", q);
+  const qs = params.toString();
+  const res = await api(`/api/garments${qs ? `?${qs}` : ""}`);
+  const garments = (res.garments ?? []).map((g) => ({
+    ...g,
+    frontUrl: g.frontUrl ? absMediaUrl(g.frontUrl) : g.frontUrl,
+    backUrl: g.backUrl ? absMediaUrl(g.backUrl) : g.backUrl,
+  }));
+  return ok({ ok: true, count: garments.length, garments });
+}
+
+async function handleUploadGarment(args) {
+  const name = String(args.name || "").trim();
+  if (!name) throw new Error("name 不能为空");
+  const category = String(args.category || "").trim();
+  if (!GARMENT_CATEGORIES.includes(category)) throw new Error("category 必须是 tops/bottoms/one-pieces/outerwear/shoes/accessory");
+  const view = GARMENT_VIEWS.includes(args.view) ? args.view : "flat";
+  const front = fileParts(args.filePath);
+  if (!["image/jpeg", "image/png", "image/webp"].includes(front.mime)) {
+    throw new Error("正面图仅支持 JPEG / PNG / WebP");
+  }
+  const form = new FormData();
+  form.append("name", name);
+  form.append("category", category);
+  form.append("view", view);
+  form.append("front", front.blob, front.name);
+  if (typeof args.notes === "string" && args.notes.trim()) form.append("notes", args.notes.trim());
+  if (Array.isArray(args.colorTags) && args.colorTags.length) form.append("colorTags", args.colorTags.join(","));
+  if (typeof args.backFilePath === "string" && args.backFilePath.trim()) {
+    const back = fileParts(args.backFilePath);
+    if (!["image/jpeg", "image/png", "image/webp"].includes(back.mime)) throw new Error("背面图仅支持 JPEG / PNG / WebP");
+    form.append("back", back.blob, back.name);
+  }
+  const res = await api("/api/garments", { method: "POST", body: form });
+  const garment = res.garment
+    ? { ...res.garment, frontUrl: absMediaUrl(res.garment.frontUrl), backUrl: res.garment.backUrl ? absMediaUrl(res.garment.backUrl) : null }
+    : null;
+  return ok({ ok: true, garmentId: garment?.id ?? null, garment });
+}
+
+async function handleCreateGarmentSet(args) {
+  const name = String(args.name || "").trim();
+  if (!name) throw new Error("name 不能为空");
+  const garmentIds = Array.isArray(args.garmentIds) ? args.garmentIds.map((id) => String(id).trim()).filter(Boolean) : [];
+  if (garmentIds.length < 1) throw new Error("garmentIds 至少 1 件（顺序内到外）");
+  const body = { name, garmentIds };
+  if (typeof args.characterId === "string" && args.characterId.trim()) body.characterId = args.characterId.trim();
+  const res = await api("/api/garment-sets", { method: "POST", body });
+  return ok({ ok: true, garmentSetId: res.set?.id ?? null, set: res.set });
+}
+
+async function handleListPoses(args) {
+  const cats = Array.isArray(args.categories)
+    ? args.categories.filter((c) => GARMENT_CATEGORIES.includes(c))
+    : [];
+  const poses = FASHION_POSE_PRESETS.filter((p) => !cats.some((c) => (p.excludeCategories || []).includes(c)));
+  return ok({ ok: true, count: poses.length, poses });
+}
+
+async function handleGenerateLooks(args) {
+  const garmentSetId = String(args.garmentSetId || "").trim();
+  if (!garmentSetId) throw new Error("garmentSetId 不能为空");
+  const character = characterFromArgs(args);
+  const poseIds = Array.isArray(args.poseIds) ? args.poseIds.filter((id) => typeof id === "string" && id.trim()) : [];
+  if (poseIds.length < 1) throw new Error("poseIds 至少 1 个（见 clipforge_list_poses）");
+  const unknown = poseIds.filter((id) => !FASHION_POSE_PRESETS.some((p) => p.id === id));
+  if (unknown.length) throw new Error(`未知姿态 id：${unknown.join("、")}`);
+  const route = TRYON_ROUTES.includes(args.route) ? args.route : "compose";
+  const creds = imageJobFields(route);
+  const llmConfig = optionalLlm();
+  const set = await garmentSetById(garmentSetId);
+  const garments = set?.garments?.length ?? set?.garmentIds?.length ?? 0;
+  const estimatedCost = estimateLookCalls({ route, poses: poseIds.length, garments, scoring: Boolean(llmConfig) });
+  const lock =
+    args.lock && typeof args.lock === "object"
+      ? { face: args.lock.face !== false, garmentPattern: args.lock.garmentPattern !== false }
+      : { face: true, garmentPattern: true };
+  const body = {
+    garmentSetId,
+    character,
+    poseIds,
+    route,
+    lock,
+    ...creds,
+    ...(typeof args.lookPresetId === "string" && args.lookPresetId.trim() ? { lookPresetId: args.lookPresetId.trim() } : {}),
+    ...(llmConfig ? { llmConfig } : {}),
+  };
+  const submitted = await api("/api/looks/generate", { method: "POST", body });
+  const lookIds = submitted.lookIds ?? [];
+  if (args.wait === false) {
+    return ok({
+      ok: true,
+      lookIds,
+      estimatedCost,
+      status: "pending",
+      next: `Look 已在后台生成。用 clipforge_get_looks { garmentSetId: "${garmentSetId}" } 轮询，直到没有 pending/generating。`,
+    });
+  }
+  const looks = (await pollLooks(garmentSetId, lookIds)).map(mapLook);
+  return ok({ ok: true, lookIds, estimatedCost, looks });
+}
+
+async function handleGetLooks(args) {
+  const garmentSetId = String(args.garmentSetId || "").trim();
+  if (!garmentSetId) throw new Error("garmentSetId 不能为空");
+  const params = new URLSearchParams({ garmentSetId });
+  if (typeof args.status === "string" && args.status.trim()) params.set("status", args.status.trim());
+  const res = await api(`/api/looks?${params}`);
+  const looks = (res.looks ?? []).map(mapLook);
+  return ok({ ok: true, count: looks.length, looks });
+}
+
+async function handleAcceptLook(args) {
+  const lookId = String(args.lookId || "").trim();
+  if (!lookId) throw new Error("lookId 不能为空");
+  const res = await api(`/api/looks/${encodeURIComponent(lookId)}`, { method: "PATCH", body: { action: "accept" } });
+  return ok({ ok: true, look: res.look ? mapLook(res.look) : res.look });
+}
+
+async function handleRetryLook(args) {
+  const lookId = String(args.lookId || "").trim();
+  if (!lookId) throw new Error("lookId 不能为空");
+  const route = TRYON_ROUTES.includes(args.route) ? args.route : "compose";
+  const creds = imageJobFields(route);
+  const llmConfig = optionalLlm();
+  const estimatedCost = estimateLookCalls({
+    route,
+    poses: 1,
+    garments: route === "vton" ? 1 : 0,
+    scoring: Boolean(llmConfig),
+  });
+  const body = {
+    ...creds,
+    ...(TRYON_ROUTES.includes(args.route) ? { route: args.route } : {}),
+    ...(typeof args.poseId === "string" && args.poseId.trim() ? { poseId: args.poseId.trim() } : {}),
+    ...(typeof args.lookPresetId === "string" && args.lookPresetId.trim() ? { lookPresetId: args.lookPresetId.trim() } : {}),
+    ...(llmConfig ? { llmConfig } : {}),
+  };
+  const submitted = await api(`/api/looks/${encodeURIComponent(lookId)}/retry`, { method: "POST", body });
+  const newId = submitted.lookId;
+  if (args.wait === true) {
+    // retry does not return garmentSetId; caller can poll get_looks on the same set
+    return ok({
+      ok: true,
+      lookId: newId,
+      estimatedCost,
+      hint: "已提交重试。用 clipforge_get_looks 按原搭配 id 轮询新 lookId。",
+    });
+  }
+  return ok({
+    ok: true,
+    lookId: newId,
+    estimatedCost,
+    next: "已新建一行 Look（不覆盖原图）。用 clipforge_get_looks 轮询该 lookId。",
+  });
+}
+
+async function handleListFashionTemplates(args) {
+  const q = typeof args.query === "string" ? args.query.trim().toLowerCase() : "";
+  const match = (t) => {
+    if (!q) return true;
+    const nameZh = t.name?.zh || "";
+    const nameEn = t.name?.en || "";
+    return [t.id, nameZh, nameEn, t.tagline?.zh, t.tagline?.en].some((s) => String(s || "").toLowerCase().includes(q));
+  };
+  const builtin = FASHION_BUILTIN_TEMPLATES.filter(match).map((t) => ({ ...t, source: "builtin" }));
+  let mine = [];
+  try {
+    const res = await api("/api/ad-template/mine");
+    mine = (res.templates ?? [])
+      .filter((t) => t.kind === "fashion")
+      .filter(match)
+      .map((t) => ({
+        id: t.id,
+        name: t.name,
+        kind: t.kind,
+        poseSequence: t.fashion?.poseSequence ?? [],
+        source: t.source || "mine",
+      }));
+  } catch {
+    /* listing mine is best-effort when the instance is older */
+  }
+  return ok({ ok: true, templates: [...builtin, ...mine] });
+}
+
+async function handleFashionVideo(args) {
+  const garmentSetId = String(args.garmentSetId || "").trim();
+  const templateId = String(args.templateId || "").trim();
+  if (!garmentSetId) throw new Error("garmentSetId 不能为空");
+  if (!templateId) throw new Error("templateId 不能为空");
+  const character = characterFromArgs(args);
+  const body = {
+    garmentSetId,
+    templateId,
+    character,
+    ...(typeof args.name === "string" && args.name.trim() ? { name: args.name.trim() } : {}),
+    ...(args.lang === "en" || args.lang === "zh" ? { lang: args.lang } : {}),
+  };
+  try {
+    const res = await api("/api/project/from-look", { method: "POST", body });
+    return ok({
+      ok: true,
+      projectId: res.projectId,
+      storedTemplate: res.storedTemplate,
+      keyframes: res.keyframes,
+      voiceoverPending: res.voiceoverPending,
+      next: `项目已建。下一步 clipforge_compose { projectId: "${res.projectId}" }，然后走 clipforge-video 交付清单（master apply:false → gate → contact_sheet）。`,
+    });
+  } catch (e) {
+    if (e?.status === 409 || Array.isArray(e?.payload?.missingPoses)) {
+      return ok({
+        ok: false,
+        missingPoses: e.payload?.missingPoses ?? [],
+        error: e.message,
+        hint: "先为 missingPoses 生成并 accept Look，再重试 clipforge_fashion_video。",
+      });
+    }
+    throw e;
+  }
+}
+
+async function handleDeriveTemplate(args) {
+  const url = typeof args.url === "string" ? args.url.trim() : "";
+  const videoPath = typeof args.videoPath === "string" ? args.videoPath.trim() : "";
+  if (!url && !videoPath) throw new Error("请提供 videoPath（本地文件）或 url");
+  requireLlm();
+  const estimatedCost = { calls: { vision: 1 }, note: "一次对标流水线（抽帧 + 视觉 LLM），不复用对方成片/音频/文案" };
+  const llmConfig = { baseUrl: LLM.baseUrl, apiKey: LLM.apiKey || "", model: LLM.model };
+  let submitted;
+  if (url) {
+    if (!/^https?:\/\//i.test(url)) throw new Error("url 必须是 http/https");
+    submitted = await api("/api/reference/ingest", { method: "POST", body: { url, llmConfig } });
+  } else {
+    const file = fileParts(videoPath);
+    const form = new FormData();
+    form.append("video", file.blob, file.name);
+    form.append("llmConfig", JSON.stringify(llmConfig));
+    submitted = await api("/api/reference/ingest", { method: "POST", body: form });
+  }
+  const referenceId = submitted.referenceId;
+  if (args.wait === false) {
+    return ok({
+      ok: true,
+      referenceId,
+      estimatedCost,
+      stage: submitted.stage ?? "queued",
+      next: `用 clipforge_get_reference { referenceId: "${referenceId}" } 轮询至 stage=done/failed。`,
+    });
+  }
+  const job = await pollReference(referenceId);
+  return ok({
+    ok: true,
+    referenceId,
+    estimatedCost,
+    stage: job.stage,
+    draft: job.draft ?? null,
+    needsConfirmation: job.needsConfirmation ?? [],
+    error: job.error ?? null,
+  });
+}
+
+async function handleGetReference(args) {
+  const referenceId = String(args.referenceId || "").trim();
+  if (!referenceId) throw new Error("referenceId 不能为空");
+  const job = await api(`/api/reference/${encodeURIComponent(referenceId)}`);
+  return ok({
+    ok: true,
+    referenceId,
+    stage: job.stage,
+    draft: job.draft ?? null,
+    needsConfirmation: job.needsConfirmation ?? [],
+    error: job.error ?? null,
+    source: job.source ?? null,
+  });
+}
+
+async function handleSaveTemplate(args) {
+  if (!args.template || typeof args.template !== "object") throw new Error("template 不能为空");
+  const source = args.source === "reference" ? "reference" : "edit";
+  const res = await api("/api/ad-template/mine", { method: "POST", body: { template: args.template, source } });
+  return ok({
+    ok: true,
+    templateId: res.template?.id ?? null,
+    template: res.template ?? null,
+    ...(res.warnings?.length ? { warnings: res.warnings } : {}),
+  });
+}
+
 const HANDLERS = {
   clipforge_create_video: handleCreateVideo,
   clipforge_ingest_product: handleIngestProduct,
@@ -1394,6 +2060,19 @@ const HANDLERS = {
   clipforge_transcript_edit: handleTranscriptEdit,
   clipforge_timeline_export: handleTimelineExport,
   clipforge_carousel: handleCarousel,
+  clipforge_list_garments: handleListGarments,
+  clipforge_upload_garment: handleUploadGarment,
+  clipforge_create_garment_set: handleCreateGarmentSet,
+  clipforge_list_poses: handleListPoses,
+  clipforge_generate_looks: handleGenerateLooks,
+  clipforge_get_looks: handleGetLooks,
+  clipforge_accept_look: handleAcceptLook,
+  clipforge_retry_look: handleRetryLook,
+  clipforge_list_fashion_templates: handleListFashionTemplates,
+  clipforge_fashion_video: handleFashionVideo,
+  clipforge_derive_template: handleDeriveTemplate,
+  clipforge_get_reference: handleGetReference,
+  clipforge_save_template: handleSaveTemplate,
 };
 
 // ---- Start MCP server ----
@@ -1420,7 +2099,12 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
   }
 });
 
-const transport = new StdioServerTransport();
-await server.connect(transport);
-// startup log goes to stderr (stdout is reserved for the MCP protocol)
-console.error(`ClipForge MCP server 已启动 · 目标实例 ${BASE_URL}`);
+export { TOOLS, HANDLERS, FASHION_POSE_PRESETS, FASHION_BUILTIN_TEMPLATES, estimateLookCalls };
+
+const isMain = Boolean(process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url));
+if (isMain) {
+  const transport = new StdioServerTransport();
+  await server.connect(transport);
+  // startup log goes to stderr (stdout is reserved for the MCP protocol)
+  console.error(`ClipForge MCP server 已启动 · 目标实例 ${BASE_URL}`);
+}

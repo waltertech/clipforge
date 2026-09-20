@@ -16,6 +16,7 @@ import {
   productionProfilePatch,
   type ProductionProfileId,
 } from "@/lib/production-profiles";
+import { DEFAULT_TRYON_ROUTE, type TryOnRouteId } from "@/lib/tryon/types";
 
 // AI Provider 配置
 export interface ProviderSetting {
@@ -45,6 +46,28 @@ export interface TTSSetting {
   speed?: number;
   /** MiniMax 国内端点的 GroupId（可选） */
   groupId?: string;
+}
+
+export interface TryOnSetting {
+  route: TryOnRouteId;
+  fashnApiKey: string;
+  fashnBaseUrl: string;
+}
+
+export const DEFAULT_TRYON: TryOnSetting = {
+  route: DEFAULT_TRYON_ROUTE,
+  fashnApiKey: "",
+  fashnBaseUrl: "",
+};
+
+function mergeTryon(value: unknown): TryOnSetting {
+  const src = value && typeof value === "object" ? (value as Partial<TryOnSetting>) : {};
+  const route = src.route === "vton" || src.route === "compose" ? src.route : DEFAULT_TRYON.route;
+  return {
+    route,
+    fashnApiKey: typeof src.fashnApiKey === "string" ? src.fashnApiKey : DEFAULT_TRYON.fashnApiKey,
+    fashnBaseUrl: typeof src.fashnBaseUrl === "string" ? src.fashnBaseUrl : DEFAULT_TRYON.fashnBaseUrl,
+  };
 }
 
 export interface SettingsState {
@@ -87,6 +110,8 @@ export interface SettingsState {
   locale: Locale;
   // 语言来源：auto=跟随系统语言自动判定，user=用户手动选过（不再自动覆盖）
   localeSource: "auto" | "user";
+  // Fashion Look try-on: compose vs FASHN vton (persisted; older saves may omit this)
+  tryon: TryOnSetting;
 
   // Actions
   setLocale: (locale: Locale) => void;
@@ -112,6 +137,7 @@ export interface SettingsState {
   applyProductionProfile: (profile: ProductionProfileId) => void;
   /** 一个 Atlas Key 一键接入：脚本+看图+生图+生视频+配音全配好（不覆盖用户已选模型/已开的配音） */
   applyAtlasOneKey: (apiKey: string) => void;
+  setTryon: (partial: Partial<TryOnSetting>) => void;
 }
 
 /** Pollinations 的新端点（旧的 text.pollinations.ai 免 Key 接口已停用） */
@@ -165,6 +191,9 @@ export function migrateSettings(state: SettingsState): SettingsState {
   if (!isProductionProfileId(state?.activeProductionProfile)) {
     state.activeProductionProfile = "balanced";
   }
+  // v6: older persisted settings have no tryon slice — merge defaults so the
+  // Look workbench and settings tab always see a complete object.
+  state.tryon = mergeTryon(state.tryon);
   return state;
 }
 
@@ -214,6 +243,7 @@ export const useSettingsStore = create<SettingsState>()(
       activeProductionProfile: "balanced",
       locale: DEFAULT_LOCALE,
       localeSource: "auto",
+      tryon: { ...DEFAULT_TRYON },
 
       // 用户手动切换：记为 user，之后不再被自动判定覆盖
       setLocale: (locale) => set({ locale, localeSource: "user" }),
@@ -243,6 +273,8 @@ export const useSettingsStore = create<SettingsState>()(
       setUiMode: (mode) => set({ uiMode: mode }),
       applyProductionProfile: (profile) =>
         set((state) => productionProfilePatch(profile, state)),
+      setTryon: (partial) =>
+        set((state) => ({ tryon: mergeTryon({ ...state.tryon, ...partial }) })),
       // 一个 Atlas Key 一键接入全套：LLM 脚本 + Vision 看图 + 生图 + 生视频 + Atlas 配音
       applyAtlasOneKey: (apiKey) =>
         set((state) => {
@@ -283,8 +315,17 @@ export const useSettingsStore = create<SettingsState>()(
       // v4：补充面向创作目标的生产方案；旧设置迁移到兼顾质量与成本的 balanced。
       // v5：Atlas 一键接入曾把「素材网关」/api/v1 写进 LLM 地址，导致写脚本必 404（issue #24），
       // 迁到 OpenAI 兼容的聊天网关 /v1。
-      version: 5,
+      // v6：补试衣 tryon 切片（route / FASHN key）；旧存档缺字段时与默认值合并。
+      version: 6,
       migrate: (persisted) => migrateSettings(persisted as SettingsState),
+      merge: (persisted, current) => {
+        const p = (persisted ?? {}) as Partial<SettingsState>;
+        return {
+          ...current,
+          ...p,
+          tryon: mergeTryon(p.tryon ?? current.tryon),
+        };
+      },
     }
   )
 );

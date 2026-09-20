@@ -18,6 +18,15 @@ import type { Shot } from "@/lib/db/schema";
 import { buildAssetRows, shouldOfferStockFill, needsImageModelWarning, nextChainKeyframe, type AssetItem, chainByDefault } from "@/lib/assets-view";
 import { realMixFromRows, shotReality } from "@/lib/real-mix";
 import { buildMotionPrompt } from "@/lib/motion-prompt";
+import {
+  adTemplateStorageKey,
+  decodeStoredAdTemplate,
+  getAdTemplate,
+  isFashionTemplate,
+  type AdTemplate,
+} from "@/lib/ad-templates";
+import { getPosePreset } from "@/lib/pose-presets";
+import type { ProjectFashionSource } from "@/lib/db/schema";
 import { keyframeInstantLine, keyframeStaticWarnings } from "@/lib/prompt-lint";
 import { applyRetakePatch, RETAKE_SYMPTOMS, type RetakeSymptom } from "@/lib/retake-patch";
 import {
@@ -153,6 +162,10 @@ export default function AssetsPage() {
   const { characters: presenterLib } = useCharacterStore();
   const [presenterId, setPresenterId] = useState("");
   const presenterSheet = presenterLib.find((c) => c.id === presenterId)?.referenceImages?.[0];
+  // Fashion Look → video: stored ad-template (localStorage) + project.fashionSource.
+  // Both stay null/undefined on ordinary projects so generateMotion / grid stay byte-identical.
+  const [fashionTemplate, setFashionTemplate] = useState<AdTemplate | undefined>();
+  const [fashionSource, setFashionSource] = useState<ProjectFashionSource | null>(null);
 
   const doneCount = assets.filter((a) => a.status === "done").length;
   const allDone = assets.length > 0 && doneCount === assets.length;
@@ -175,6 +188,15 @@ export default function AssetsPage() {
   const offerStockFill = !loading && shouldOfferStockFill(assets, contentType, modelTarget !== null);
   // only show the "configure a model" warning when there are still AI shots that need generating (no warning once everything is ready, to avoid contradicting the "all done" state)
   const showModelWarning = !loading && needsImageModelWarning(assets, modelTarget !== null);
+
+  useEffect(() => {
+    try {
+      const stored = decodeStoredAdTemplate(localStorage.getItem(adTemplateStorageKey(id)));
+      if (stored) setFashionTemplate(stored);
+    } catch {
+      /* ignore corrupt storage */
+    }
+  }, [id]);
 
   // load real data: project info + selected script shots + resolve the provider for the default image model
   useEffect(() => {
@@ -202,6 +224,14 @@ export default function AssetsPage() {
           setProjectCategory(typeof project.productCategory === "string" ? project.productCategory : "");
           setProjectCreativeIntent(sanitizeCreativeIntent(project.creativeIntent));
           setProjectVisualBible(sanitizeVisualBible(project.visualBible));
+          if (project.fashionSource && typeof project.fashionSource === "object") {
+            const src = project.fashionSource as ProjectFashionSource;
+            setFashionSource(src);
+            if (src.characterId) setPresenterId(src.characterId);
+            setFashionTemplate((current) => current ?? getAdTemplate(src.templateId));
+          } else {
+            setFashionSource(null);
+          }
           if (Array.isArray(project.productionWorkflow)) {
             const motionStage = project.productionWorkflow.find((stage: { id?: unknown }) => stage.id === "motion");
             if (motionStage) setAutoMotion(motionStage.enabled !== false);
@@ -582,6 +612,9 @@ export default function AssetsPage() {
         // category physical-realism layers (tier is a user single-select; "auto" by default)
         category: projectCategory,
         realism: motionRealism,
+        ...(isFashionTemplate(fashionTemplate) && {
+          lock: { ...fashionTemplate.fashion.lock, negative: fashionTemplate.fashion.negative },
+        }),
       });
       // diagnosis retake (user-initiated, billed): patch exactly ONE dimension onto the prompt.
       // Base = the freshly rebuilt prompt — deterministic, so with unchanged settings it equals
@@ -645,6 +678,21 @@ export default function AssetsPage() {
       const referenceImageUrls = controlPlan.referenceInputs.filter((item) => item.mediaType === "image").map((item) => item.url);
       const referenceVideoUrls = controlPlan.referenceInputs.filter((item) => item.mediaType === "video").map((item) => item.url);
       const referenceAudioUrls = controlPlan.referenceInputs.filter((item) => item.mediaType === "audio").map((item) => item.url);
+      // Fashion Look i2v: other shots' Look stills as extra identity/outfit refs (max 4, never this shot's own keyframe).
+      // Ordinary projects have no type=look assets, so lookRefs stays empty and the request body is unchanged.
+      const lookRefs: string[] = [];
+      if (assets.some((item) => item.assetType === "look")) {
+        for (const item of assets) {
+          if (item.shotId === shotId) continue;
+          const url = item.assetType === "look" ? item.thumbnailUrl : item.keyframeUrl;
+          if (!url || url === effectiveFirstFrame || lookRefs.includes(url)) continue;
+          lookRefs.push(url);
+          if (lookRefs.length >= 4) break;
+        }
+      }
+      const mergedReferenceImageUrls = lookRefs.length
+        ? [...referenceImageUrls, ...lookRefs.filter((url) => !referenceImageUrls.includes(url))]
+        : referenceImageUrls;
       const controlSummary = sanitizeVideoControlSummary(controlPlan);
       try {
         const res = await fetch("/api/ai/video", {
@@ -659,7 +707,7 @@ export default function AssetsPage() {
             prompt: finalPrompt,
             ...(controlPlan.firstFrameUrl && { imageUrl: controlPlan.firstFrameUrl }),
             ...(controlPlan.lastFrameUrl && { lastImageUrl: controlPlan.lastFrameUrl }),
-            ...(referenceImageUrls.length && { referenceImageUrls }),
+            ...(mergedReferenceImageUrls.length && { referenceImageUrls: mergedReferenceImageUrls }),
             ...(referenceVideoUrls.length && { referenceVideoUrls }),
             ...(referenceAudioUrls.length && { referenceAudioUrls }),
             ...(controlSummary && { controlPlan: controlSummary }),
@@ -700,7 +748,7 @@ export default function AssetsPage() {
         });
       }
     },
-    [assets, videoModelTarget, id, videoParams, motionIntensity, motionRealism, chainMode, projectCategory, projectCreativeIntent, projectVisualBible, visualLook, productSafe, productImages, presenterLib, presenterSheet, saveVideoAsset, reloadPendingTasks, t, locale]
+    [assets, videoModelTarget, id, videoParams, motionIntensity, motionRealism, chainMode, projectCategory, projectCreativeIntent, projectVisualBible, visualLook, productSafe, productImages, presenterLib, presenterSheet, fashionTemplate, saveVideoAsset, reloadPendingTasks, t, locale]
   );
 
   // actually generate a single asset. Returns the saved static keyframe URL (undefined on failure) so
@@ -857,6 +905,7 @@ export default function AssetsPage() {
           apiKey: modelTarget.apiKey,
           baseUrl: modelTarget.baseUrl,
           ...(presenterSheet && { characterSheetUrl: presenterSheet }),
+          ...(fashionSource?.garmentImageUrl && { garmentImageUrl: fashionSource.garmentImageUrl }),
           ...(productRef && { productImageUrl: productRef }),
           // the grid itself is 9:16 so each of the 3x3 cells is exactly 9:16 too
           options: buildImageOptions(imageParams ? { ...imageParams, aspectRatio: "9:16", count: 1 } : undefined),
@@ -871,7 +920,7 @@ export default function AssetsPage() {
     } finally {
       setIsGridGenerating(false);
     }
-  }, [id, scriptId, modelTarget, imageParams, isGridGenerating, presenterSheet, productSafe, productImages, reloadAssets, t]);
+  }, [id, scriptId, modelTarget, imageParams, isGridGenerating, presenterSheet, productSafe, productImages, fashionSource, reloadAssets, t]);
 
   // grid→film (field-proven 2026-08): every shot keyframe rides ONE Seedance 2.5
   // reference-to-video call with a timecoded multi-shot prompt — native cuts, dialogue
@@ -1436,6 +1485,13 @@ export default function AssetsPage() {
                   assetType: asset.assetType,
                   done: asset.status === "done",
                 });
+                const lookPoseId =
+                  asset.assetType === "look" && isFashionTemplate(fashionTemplate)
+                    ? fashionTemplate.fashion.poseSequence[asset.shotId - 1]
+                    : undefined;
+                const lookPoseName = lookPoseId
+                  ? (getPosePreset(lookPoseId)?.name[locale] ?? lookPoseId)
+                  : undefined;
                 return (
                   <Card key={asset.shotId} className="glass-card overflow-hidden">
                     <CardContent className="p-0">
@@ -1459,6 +1515,18 @@ export default function AssetsPage() {
                             >
                               {reality === "real" ? t("badgeReal") : t("badgeAi")}
                             </span>
+                          )}
+                          {asset.assetType === "look" && (
+                            <>
+                              <span className="text-[9px] mt-1 px-1 rounded bg-pink-500/15 text-pink-500">
+                                {t("badgeLook")}
+                              </span>
+                              {lookPoseName && (
+                                <span className="text-[9px] mt-0.5 text-muted-foreground truncate max-w-[3.5rem] text-center">
+                                  {lookPoseName}
+                                </span>
+                              )}
+                            </>
                           )}
                         </div>
 

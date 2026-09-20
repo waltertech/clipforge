@@ -43,6 +43,8 @@ const NAV_SECTIONS: { labelKey: string; items: NavItem[] }[] = [
       { key: "navProjects", href: "/projects", icon: "folder" },
       { key: "navProducts", href: "/products", icon: "box" },
       { key: "navPresenters", href: "/presenters", icon: "user" },
+      { key: "navGarments", href: "/garments", icon: "hanger" },
+      { key: "navLooks", href: "/looks", icon: "looks" },
     ],
   },
 ];
@@ -69,6 +71,20 @@ function NavIcon({ name }: { name: string }) {
       <>
         <circle cx="12" cy="8" r="4" />
         <path d="M4 21c0-4 3.5-6 8-6s8 2 8 6" />
+      </>
+    ),
+    hanger: (
+      <>
+        <path d="M9 7a3 3 0 1 1 3 3" />
+        <path d="M12 10 20 19H4l8-9Z" />
+      </>
+    ),
+    looks: (
+      <>
+        <rect x="3" y="3" width="7" height="7" rx="1" />
+        <rect x="14" y="3" width="7" height="7" rx="1" />
+        <rect x="3" y="14" width="7" height="7" rx="1" />
+        <rect x="14" y="14" width="7" height="7" rx="1" />
       </>
     ),
     gear: (
@@ -98,6 +114,8 @@ function NavIcon({ name }: { name: string }) {
  */
 export function AppShell({ children }: { children: React.ReactNode }) {
   const t = useT("common");
+  const tGarments = useT("garments");
+  const tLooks = useT("looks");
   const pathname = usePathname();
   const router = useRouter();
   const uiMode = useSettingsStore((s) => s.uiMode);
@@ -136,11 +154,17 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   }, null);
   const settingsActive = pathname?.startsWith("/settings") ?? false;
 
+  const navLabel = (item: NavItem) => {
+    if (item.key === "navGarments") return tGarments("navItem");
+    if (item.key === "navLooks") return tLooks("navItem");
+    return t(item.key);
+  };
+
   const navLink = (item: NavItem) => (
     <Link
       key={item.key}
       href={item.href}
-      title={collapsed ? t(item.key) : undefined}
+      title={collapsed ? navLabel(item) : undefined}
       className={`flex items-center gap-2.5 rounded-lg px-3 py-2 text-sm transition-colors ${collapsed ? "justify-center px-0" : ""} ${
         active === item.href
           ? "bg-primary/15 font-medium text-primary"
@@ -148,7 +172,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       }`}
     >
       <NavIcon name={item.icon} />
-      {!collapsed && t(item.key)}
+      {!collapsed && navLabel(item)}
     </Link>
   );
 
@@ -248,7 +272,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
                 {/* Base UI menu items don't take asChild — navigate via router */}
                 {visibleItems.map((item) => (
                   <DropdownMenuItem key={item.key} onClick={() => router.push(item.href)}>
-                    {t(item.key)}
+                    {navLabel(item)}
                   </DropdownMenuItem>
                 ))}
                 <DropdownMenuItem onClick={() => router.push("/settings")}>

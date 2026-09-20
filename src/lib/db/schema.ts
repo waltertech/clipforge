@@ -15,6 +15,8 @@ import type {
   ShotQualityContract,
 } from "@/lib/generation-quality";
 import type { GenerationControlSummary } from "@/lib/video-repair-plan";
+import type { LookScore, TryOnRouteId, GarmentView, LookCharacterSnapshot } from "@/lib/tryon/types";
+import type { GarmentCategory } from "@/lib/pose-presets";
 
 // Projects table
 export const projects = sqliteTable("projects", {
@@ -43,6 +45,8 @@ export const projects = sqliteTable("projects", {
   sourceType: text("source_type", { enum: ["manual", "clone"] }).default("manual"), // manual=created by hand, clone=viral-video remake
   sourceVideoUrl: text("source_video_url"), // Source video URL for viral-video remakes
   characterId: text("character_id"), // On-screen character bound to the project (live_presenter mode only)
+  /** Fashion Look → video provenance. Null for every non-fashion project. */
+  fashionSource: text("fashion_source", { mode: "json" }).$type<ProjectFashionSource>(),
   // Project-level production intelligence. JSON columns keep the new planning/memory layer
   // additive: existing projects read null and continue through the original pipeline unchanged.
   creativeIntent: text("creative_intent", { mode: "json" }).$type<CreativeIntent>(),
@@ -97,7 +101,8 @@ export const assets = sqliteTable("assets", {
   projectId: text("project_id").notNull().references(() => projects.id, { onDelete: "cascade" }),
   shotId: integer("shot_id").notNull(), // Corresponding shot index
   // stock_footage = free commercial-use video/images fetched from a stock library (e.g. Pexels)
-  type: text("type", { enum: ["ai_generated", "product_image", "user_upload", "stock_footage"] }).notNull(),
+  // look = accepted fashion Look still (garment-on-model) imported as a shot keyframe
+  type: text("type", { enum: ["ai_generated", "product_image", "user_upload", "stock_footage", "look"] }).notNull(),
   filePath: text("file_path"),
   thumbnailPath: text("thumbnail_path"),
   provider: text("provider"),
@@ -368,6 +373,61 @@ export const characters = sqliteTable("characters", {
   updatedAt: integer("updated_at", { mode: "timestamp" }).$defaultFn(() => new Date()),
 });
 
+// ===== Fashion Look workbench =====
+
+// Garments table — user-uploaded clothing reference images (flat-lay or on-model), reused across Looks
+export const garments = sqliteTable("garments", {
+  id: text("id").primaryKey().$defaultFn(() => crypto.randomUUID()),
+  name: text("name").notNull(),
+  category: text("category", { enum: ["tops", "bottoms", "one-pieces", "outerwear", "shoes", "accessory"] })
+    .$type<GarmentCategory>()
+    .notNull(),
+  view: text("view", { enum: ["flat", "on-model"] }).$type<GarmentView>().notNull().default("flat"),
+  frontPath: text("front_path").notNull(), // Front reference image (relative to uploads dir)
+  backPath: text("back_path"), // Optional back reference image
+  colorTags: text("color_tags", { mode: "json" }).$type<string[]>().default([]),
+  notes: text("notes"), // Fabric / cut / pattern notes injected into the Look prompt
+  createdAt: integer("created_at", { mode: "timestamp" }).$defaultFn(() => new Date()),
+  updatedAt: integer("updated_at", { mode: "timestamp" }).$defaultFn(() => new Date()),
+});
+
+// Garment sets table — one outfit: 1–5 garments ordered inner → outer, optionally pinned to a presenter.
+// `characterId` is NOT a foreign key: presenters live in the client-side character store
+// (useCharacterStore, localStorage), and the DB `characters` table is only a mirror.
+export const garmentSets = sqliteTable("garment_sets", {
+  id: text("id").primaryKey().$defaultFn(() => crypto.randomUUID()),
+  name: text("name").notNull(),
+  garmentIds: text("garment_ids", { mode: "json" }).$type<string[]>().notNull(),
+  characterId: text("character_id"),
+  createdAt: integer("created_at", { mode: "timestamp" }).$defaultFn(() => new Date()),
+  updatedAt: integer("updated_at", { mode: "timestamp" }).$defaultFn(() => new Date()),
+});
+
+// Looks table — one candidate still per (garment set, presenter, pose) generation. Looks are versions,
+// never deleted on reject; exactly one may be `accepted` per garment set + pose.
+export const looks = sqliteTable("looks", {
+  id: text("id").primaryKey().$defaultFn(() => crypto.randomUUID()),
+  garmentSetId: text("garment_set_id").notNull().references(() => garmentSets.id, { onDelete: "cascade" }),
+  characterId: text("character_id").notNull(), // client character-store id (no FK, see garment_sets)
+  // Presenter facts frozen at generation time so the Look stays reproducible if the presenter is edited later
+  characterSnapshot: text("character_snapshot", { mode: "json" }).$type<LookCharacterSnapshot>(),
+  poseId: text("pose_id").notNull(), // pose-presets id
+  lookPresetId: text("look_preset_id"), // look-presets id (lighting / backdrop)
+  route: text("route", { enum: ["compose", "vton"] }).$type<TryOnRouteId>().notNull(),
+  provider: text("provider"),
+  model: text("model"),
+  prompt: text("prompt"),
+  imagePath: text("image_path"), // Result image (relative to uploads dir)
+  aiTaskId: text("ai_task_id"), // ai_tasks.id when the route submitted an async job
+  score: text("score", { mode: "json" }).$type<LookScore>(),
+  status: text("status", { enum: ["pending", "generating", "candidate", "accepted", "rejected", "failed"] })
+    .notNull()
+    .default("pending"),
+  error: text("error"), // Friendly failure reason when status = failed
+  createdAt: integer("created_at", { mode: "timestamp" }).$defaultFn(() => new Date()),
+  updatedAt: integer("updated_at", { mode: "timestamp" }).$defaultFn(() => new Date()),
+});
+
 // Settings table
 export const settings = sqliteTable("settings", {
   key: text("key").primaryKey(),
@@ -376,6 +436,14 @@ export const settings = sqliteTable("settings", {
 });
 
 // ===== Type definitions =====
+
+/** Provenance for a project created from accepted Looks + a fashion template. */
+export interface ProjectFashionSource {
+  garmentSetId: string;
+  templateId: string;
+  characterId: string;
+  garmentImageUrl?: string;
+}
 
 /** Video mode: determines the asset generation strategy */
 export type VideoMode =

@@ -38,7 +38,7 @@ const SHOT_TYPE_LABELS: Record<string, string> = {
 export function buildStoryboardGridPrompt(
   shots: Shot[],
   characters?: ScriptCharacter[] | null,
-  refs?: { characterSheet?: boolean; productImage?: boolean }
+  refs?: { characterSheet?: boolean; garmentImage?: boolean; productImage?: boolean }
 ): string {
   const cells = shots.slice(0, GRID_MAX_SHOTS);
   const cast = (characters ?? [])
@@ -51,15 +51,22 @@ export function buildStoryboardGridPrompt(
     return `第 ${i + 1} 格（${label}）：${s.description}`;
   });
 
-  // reference-image contract: the images array order is [character sheet?, product photo?],
-  // so the prompt cites them by position (field-proven with gpt-image-2/edit)
+  // reference-image contract: the images array order is
+  // [character sheet?, garment image?, product photo?], so the prompt cites
+  // them by position (field-proven with gpt-image-2/edit)
   const refLines: string[] = [];
-  if (refs?.characterSheet || refs?.productImage) {
+  if (refs?.characterSheet || refs?.garmentImage || refs?.productImage) {
     let n = 0;
     if (refs.characterSheet) {
       n += 1;
       refLines.push(
         `第 ${n} 张参考图是出镜人物的四视图定妆照——九格中的人物脸型、发型、体型与服装必须与其完全一致（定妆照只作人物参考，不作为分镜画面）。人物需自然融入各格自身的场景与光线，不得把定妆照的浅灰影棚背景、四格分格或边框带进任何一格。`
+      );
+    }
+    if (refs.garmentImage) {
+      n += 1;
+      refLines.push(
+        `第 ${n} 张参考图是服装参考图——九格中人物所穿服装的款式、颜色、图案与版型必须与其完全一致，不得换装。`
       );
     }
     if (refs.productImage) {

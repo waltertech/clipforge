@@ -20,16 +20,28 @@
  *   CLIPFORGE_BASE_URL (default http://localhost:3000)
  *   CLIPFORGE_LLM_BASE_URL / CLIPFORGE_LLM_API_KEY / CLIPFORGE_LLM_MODEL (required for create, OpenAI-compatible)
  *   CLIPFORGE_PEXELS_KEY / CLIPFORGE_PIXABAY_KEY (optional, for supplemental paid high-quality video sources)
+ *   CLIPFORGE_IMAGE_PROVIDER / CLIPFORGE_IMAGE_MODEL / CLIPFORGE_IMAGE_API_KEY / CLIPFORGE_IMAGE_BASE_URL (Look compose)
+ *   CLIPFORGE_FASHN_API_KEY / CLIPFORGE_FASHN_BASE_URL (Look vton)
  */
 import { readFileSync, writeFileSync } from "fs";
 import { fileURLToPath } from "url";
-import { dirname, join } from "path";
+import { dirname, join, basename, resolve } from "path";
 
 const BASE_URL = (process.env.CLIPFORGE_BASE_URL || "http://localhost:3000").replace(/\/+$/, "");
 const LLM = {
   baseUrl: process.env.CLIPFORGE_LLM_BASE_URL || "",
   apiKey: process.env.CLIPFORGE_LLM_API_KEY || "",
   model: process.env.CLIPFORGE_LLM_MODEL || "",
+};
+const IMAGE = {
+  provider: process.env.CLIPFORGE_IMAGE_PROVIDER || "",
+  model: process.env.CLIPFORGE_IMAGE_MODEL || "",
+  apiKey: process.env.CLIPFORGE_IMAGE_API_KEY || "",
+  baseUrl: process.env.CLIPFORGE_IMAGE_BASE_URL || "",
+};
+const FASHN = {
+  apiKey: process.env.CLIPFORGE_FASHN_API_KEY || "",
+  baseUrl: process.env.CLIPFORGE_FASHN_BASE_URL || "",
 };
 const STOCK_KEYS = {};
 if (process.env.CLIPFORGE_PIXABAY_KEY) STOCK_KEYS.pixabay = process.env.CLIPFORGE_PIXABAY_KEY;
@@ -125,12 +137,13 @@ export function defaultVoiceForTopic(topic) {
 async function api(path, { method = "GET", body, timeoutMs = 600000 } = {}) {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+  const isForm = typeof FormData !== "undefined" && body instanceof FormData;
   let res, text;
   try {
     res = await fetch(`${BASE_URL}${path}`, {
       method,
-      headers: body ? { "Content-Type": "application/json" } : undefined,
-      body: body ? JSON.stringify(body) : undefined,
+      headers: body && !isForm ? { "Content-Type": "application/json" } : undefined,
+      body: isForm ? body : body ? JSON.stringify(body) : undefined,
       signal: ctrl.signal,
     });
     text = await res.text();
@@ -146,7 +159,12 @@ async function api(path, { method = "GET", body, timeoutMs = 600000 } = {}) {
   } catch {
     data = { raw: text };
   }
-  if (!res.ok) throw new Error(data?.error || data?.raw || `HTTP ${res.status}`);
+  if (!res.ok) {
+    const err = new Error(data?.error || data?.raw || `HTTP ${res.status}`);
+    err.payload = data;
+    err.status = res.status;
+    throw err;
+  }
   return data;
 }
 
@@ -724,6 +742,345 @@ async function cmdDub(flags) {
   return { ok: true, projectId, ...res };
 }
 
+const GARMENT_CATEGORIES = ["tops", "bottoms", "one-pieces", "outerwear", "shoes", "accessory"];
+const GARMENT_VIEWS = ["flat", "on-model"];
+const TRYON_ROUTES = ["compose", "vton"];
+/** Keep in sync with src/lib/pose-presets.ts */
+const FASHION_POSE_IDS = ["front_stand", "three_quarter", "side", "back", "walk_toward", "hands_pocket", "seated", "detail_torso"];
+
+function slugId(name) {
+  return String(name || "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/gi, "-")
+    .replace(/^-+|-+$/g, "") || "presenter";
+}
+
+function optionalLlm() {
+  if (!LLM.baseUrl || !LLM.model) return undefined;
+  return { baseUrl: LLM.baseUrl, apiKey: LLM.apiKey || "", model: LLM.model };
+}
+
+function estimateLookCalls({ route, poses, garments, scoring }) {
+  const r = route === "vton" ? "vton" : "compose";
+  const poseN = Math.max(0, Number(poses) || 0);
+  const garmentN = Math.max(0, Number(garments) || 0);
+  return {
+    poses: poseN,
+    garments: garmentN,
+    calls: {
+      image: r === "compose" ? poseN : 0,
+      tryon: r === "vton" ? poseN * garmentN : 0,
+      vision: scoring ? poseN : 0,
+    },
+  };
+}
+
+function requireYes(flags, estimatedCost) {
+  step(`付费调用估算：${JSON.stringify(estimatedCost)}`);
+  if (flags.yes === true) return;
+  const err = new Error("付费调用需要 --yes 确认后再执行（本次未调用接口）");
+  err.exitCode = 3;
+  throw err;
+}
+
+function characterFromFlags(flags) {
+  const name = String(flags["character-name"] || "").trim();
+  if (!name) throw new Error("--character-name 不能为空（主持人不在服务端，请内联传入姓名；id 可用 --character-id 或 --character）");
+  const id = String(flags["character-id"] || flags.character || "").trim() || slugId(name);
+  const refs = typeof flags["character-ref"] === "string" && flags["character-ref"]
+    ? String(flags["character-ref"]).split(",").map((s) => s.trim()).filter(Boolean)
+    : [];
+  const appearance = typeof flags.appearance === "string" ? flags.appearance.trim() : "";
+  return { id, name, ...(appearance ? { appearance } : {}), referenceImages: refs };
+}
+
+function imageJobFields(route) {
+  if (route === "vton") {
+    if (!FASHN.apiKey) throw new Error("vton 路线需要 CLIPFORGE_FASHN_API_KEY");
+    return {
+      provider: IMAGE.provider || "fashn",
+      model: IMAGE.model || "tryon-v1.6",
+      apiKey: IMAGE.apiKey || "",
+      baseUrl: IMAGE.baseUrl || "",
+      tryon: { apiKey: FASHN.apiKey, ...(FASHN.baseUrl ? { baseUrl: FASHN.baseUrl } : {}) },
+    };
+  }
+  if (!IMAGE.provider || !IMAGE.model || !IMAGE.apiKey) {
+    throw new Error("compose 路线需要 CLIPFORGE_IMAGE_PROVIDER、CLIPFORGE_IMAGE_MODEL、CLIPFORGE_IMAGE_API_KEY");
+  }
+  return { provider: IMAGE.provider, model: IMAGE.model, apiKey: IMAGE.apiKey, baseUrl: IMAGE.baseUrl || "" };
+}
+
+function fileBlob(filePath) {
+  const path = String(filePath || "").trim();
+  if (!path) throw new Error("文件路径不能为空");
+  let buf;
+  try {
+    buf = readFileSync(path);
+  } catch (e) {
+    throw new Error(`读不了本地文件：${path}（${e?.message || e}）`);
+  }
+  const name = basename(path).replace(/[/\\]/g, "") || "upload.bin";
+  const ext = name.includes(".") ? name.split(".").pop().toLowerCase() : "";
+  const mime =
+    ext === "jpg" || ext === "jpeg"
+      ? "image/jpeg"
+      : ext === "png"
+        ? "image/png"
+        : ext === "webp"
+          ? "image/webp"
+          : ext === "mp4"
+            ? "video/mp4"
+            : ext === "webm"
+              ? "video/webm"
+              : ext === "mov"
+                ? "video/quicktime"
+                : "application/octet-stream";
+  return { blob: new Blob([buf], { type: mime }), name, mime };
+}
+
+async function pollLooks(garmentSetId, lookIds, { timeoutMs = 360000, intervalMs = 2500 } = {}) {
+  const want = new Set(lookIds);
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const { looks } = await api(`/api/looks?garmentSetId=${encodeURIComponent(garmentSetId)}`);
+    const mine = (looks ?? []).filter((l) => want.has(l.id));
+    const busy = mine.some((l) => l.status === "pending" || l.status === "generating");
+    if (!busy && mine.length >= lookIds.length) return mine;
+    if (Date.now() > deadline) throw new Error("Look 生成超时，可稍后用 `looks list --set` 再查");
+    await new Promise((r) => setTimeout(r, intervalMs));
+  }
+}
+
+async function pollReference(referenceId, { timeoutMs = 360000, intervalMs = 2500 } = {}) {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const job = await api(`/api/reference/${encodeURIComponent(referenceId)}`);
+    if (job.stage === "done" || job.stage === "failed") return job;
+    if (Date.now() > deadline) throw new Error("对标任务超时，可稍后用 `template get-reference` 再查");
+    await new Promise((r) => setTimeout(r, intervalMs));
+  }
+}
+
+const GARMENTS_HELP = `clipforge garments — 服装库
+
+用法：
+  clipforge garments list [--category tops|bottoms|one-pieces|outerwear|shoes|accessory] [--q 关键词]
+  clipforge garments add --name "黑T" --category tops --front ./front.jpg [--back ./back.jpg] [--view flat|on-model] [--notes "..."] [--color-tags black]
+
+只走 API 上传，不要写数据目录。`;
+
+const LOOKS_HELP = `clipforge looks — 生成 / 列出 / 接受模特 Look
+
+用法：
+  clipforge looks --set <id> --poses front_stand,side,back --character-name Ada
+                 [--character-id ada] [--character-ref <url>] [--appearance "..."]
+                 [--route compose|vton] [--look <preset>] [--yes] [--no-wait]
+  clipforge looks list --set <id> [--status accepted]
+  clipforge looks accept <lookId>
+
+主持人不在服务端：必须 --character-name（id 可自拟）。付费生成会打印 { poses, garments, calls }，需要 --yes。`;
+
+const FASHION_CMD_HELP = `clipforge fashion — 从已接受 Look + 时装模板建项目
+
+用法：
+  clipforge fashion --template mirror_turn --set <id> --character-name Ada
+                    [--character-id ada] [--character-ref <url>] [--name "..."] [--lang zh|en] [--yes]
+
+内置模板：runway_walk / mirror_turn / ootd_talk / detail_macro。
+缺姿态时返回 missingPoses（不建项目）。成功后用 compose --project <id> 出片。`;
+
+const TEMPLATE_HELP = `clipforge template — 从对标视频衍生时装模板
+
+用法：
+  clipforge template derive <video|url> [--yes] [--no-wait]
+  clipforge template get-reference <referenceId>
+
+derive 为付费视觉 LLM 调用，需要 CLIPFORGE_LLM_* 与 --yes。只提取结构，不复用对方成片/音频/文案。`;
+
+async function cmdGarments(flags, rest = []) {
+  const sub = rest[0];
+  if (!sub) throw new Error("用法：garments list|add。详见 clipforge garments --help");
+  if (sub === "list") {
+    const params = new URLSearchParams();
+    if (GARMENT_CATEGORIES.includes(flags.category)) params.set("category", flags.category);
+    const q = typeof flags.q === "string" ? flags.q.trim() : "";
+    if (q) params.set("q", q);
+    const qs = params.toString();
+    const res = await api(`/api/garments${qs ? `?${qs}` : ""}`);
+    return { ok: true, count: (res.garments ?? []).length, garments: res.garments ?? [] };
+  }
+  if (sub === "add") {
+    const name = String(flags.name || "").trim();
+    if (!name) throw new Error("--name 不能为空");
+    const category = String(flags.category || "").trim();
+    if (!GARMENT_CATEGORIES.includes(category)) throw new Error("--category 必须是 tops/bottoms/one-pieces/outerwear/shoes/accessory");
+    const frontPath = String(flags.front || "").trim();
+    if (!frontPath) throw new Error("--front <file> 不能为空");
+    const view = GARMENT_VIEWS.includes(flags.view) ? flags.view : "flat";
+    const front = fileBlob(frontPath);
+    if (!["image/jpeg", "image/png", "image/webp"].includes(front.mime)) throw new Error("--front 仅支持 JPEG / PNG / WebP");
+    const form = new FormData();
+    form.append("name", name);
+    form.append("category", category);
+    form.append("view", view);
+    form.append("front", front.blob, front.name);
+    if (typeof flags.notes === "string" && flags.notes.trim()) form.append("notes", flags.notes.trim());
+    if (typeof flags["color-tags"] === "string" && flags["color-tags"].trim()) form.append("colorTags", flags["color-tags"].trim());
+    if (typeof flags.back === "string" && flags.back.trim()) {
+      const back = fileBlob(flags.back);
+      if (!["image/jpeg", "image/png", "image/webp"].includes(back.mime)) throw new Error("--back 仅支持 JPEG / PNG / WebP");
+      form.append("back", back.blob, back.name);
+    }
+    const res = await api("/api/garments", { method: "POST", body: form });
+    step(`已上传服装 ${res.garment?.id}`);
+    return { ok: true, garmentId: res.garment?.id ?? null, garment: res.garment };
+  }
+  throw new Error(`未知 garments 子命令：${sub}。用 list 或 add。`);
+}
+
+async function cmdLooks(flags, rest = []) {
+  const sub = rest[0];
+  if (sub === "list") {
+    const garmentSetId = String(flags.set || "").trim();
+    if (!garmentSetId) throw new Error("--set 不能为空");
+    const params = new URLSearchParams({ garmentSetId });
+    if (typeof flags.status === "string" && flags.status.trim()) params.set("status", flags.status.trim());
+    const res = await api(`/api/looks?${params}`);
+    return { ok: true, count: (res.looks ?? []).length, looks: res.looks ?? [] };
+  }
+  if (sub === "accept") {
+    const lookId = String(rest[1] || flags.id || "").trim();
+    if (!lookId) throw new Error("用法：looks accept <lookId>");
+    const res = await api(`/api/looks/${encodeURIComponent(lookId)}`, { method: "PATCH", body: { action: "accept" } });
+    step(`已接受 Look ${res.look?.id}（同姿态旧 accepted 已降级）`);
+    return { ok: true, look: res.look };
+  }
+  if (sub && sub !== "generate") {
+    throw new Error(`未知 looks 子命令：${sub}。用（默认 generate）/ list / accept。`);
+  }
+  const garmentSetId = String(flags.set || "").trim();
+  if (!garmentSetId) throw new Error("--set 不能为空。查看用法：clipforge looks --help");
+  const poseIds = String(flags.poses || "")
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+  if (poseIds.length < 1) throw new Error("--poses 不能为空（逗号分隔，如 front_stand,side,back）");
+  const unknown = poseIds.filter((id) => !FASHION_POSE_IDS.includes(id));
+  if (unknown.length) throw new Error(`未知姿态 id：${unknown.join("、")}`);
+  const character = characterFromFlags(flags);
+  const route = TRYON_ROUTES.includes(flags.route) ? flags.route : "compose";
+  const llmConfig = optionalLlm();
+  const estimatedCost = estimateLookCalls({
+    route,
+    poses: poseIds.length,
+    garments: Number.isFinite(Number(flags.garments)) ? Number(flags.garments) : route === "vton" ? 1 : 0,
+    scoring: Boolean(llmConfig),
+  });
+  requireYes(flags, estimatedCost);
+  const creds = imageJobFields(route);
+  const body = {
+    garmentSetId,
+    character,
+    poseIds,
+    route,
+    lock: { face: true, garmentPattern: true },
+    ...creds,
+    ...(typeof flags.look === "string" && flags.look.trim() ? { lookPresetId: flags.look.trim() } : {}),
+    ...(llmConfig ? { llmConfig } : {}),
+  };
+  step(`提交 Look 生成（${route} · ${poseIds.length} 姿态）…`);
+  const submitted = await api("/api/looks/generate", { method: "POST", body });
+  const lookIds = submitted.lookIds ?? [];
+  if (flags["no-wait"] === true) {
+    return { ok: true, lookIds, estimatedCost, status: "pending" };
+  }
+  const looks = await pollLooks(garmentSetId, lookIds);
+  return { ok: true, lookIds, estimatedCost, looks };
+}
+
+async function cmdFashion(flags) {
+  const templateId = String(flags.template || "").trim();
+  const garmentSetId = String(flags.set || "").trim();
+  if (!templateId) throw new Error("--template 不能为空（runway_walk|mirror_turn|ootd_talk|detail_macro）");
+  if (!garmentSetId) throw new Error("--set 不能为空");
+  const character = characterFromFlags(flags);
+  const estimatedCost = { calls: { compose: "later" }, note: "from-look 本身不生图；随后 clipforge compose 为付费视频管线" };
+  requireYes(flags, estimatedCost);
+  const body = {
+    garmentSetId,
+    templateId,
+    character,
+    ...(typeof flags.name === "string" && flags.name.trim() ? { name: flags.name.trim() } : {}),
+    ...(flags.lang === "en" || flags.lang === "zh" ? { lang: flags.lang } : {}),
+  };
+  try {
+    const res = await api("/api/project/from-look", { method: "POST", body });
+    step(`已建项目 ${res.projectId}。下一步：clipforge compose --project ${res.projectId}`);
+    return {
+      ok: true,
+      projectId: res.projectId,
+      storedTemplate: res.storedTemplate,
+      keyframes: res.keyframes,
+      voiceoverPending: res.voiceoverPending,
+    };
+  } catch (e) {
+    if (e?.status === 409 || Array.isArray(e?.payload?.missingPoses)) {
+      return { ok: false, missingPoses: e.payload?.missingPoses ?? [], error: e.message, exitCode: 1 };
+    }
+    throw e;
+  }
+}
+
+async function cmdTemplate(flags, rest = []) {
+  const sub = rest[0];
+  if (!sub) throw new Error("用法：template derive <video|url> | template get-reference <id>。详见 clipforge template --help");
+  if (sub === "get-reference") {
+    const referenceId = String(rest[1] || flags.id || "").trim();
+    if (!referenceId) throw new Error("用法：template get-reference <referenceId>");
+    const job = await api(`/api/reference/${encodeURIComponent(referenceId)}`);
+    return {
+      ok: true,
+      referenceId,
+      stage: job.stage,
+      draft: job.draft ?? null,
+      needsConfirmation: job.needsConfirmation ?? [],
+      error: job.error ?? null,
+    };
+  }
+  if (sub !== "derive") throw new Error(`未知 template 子命令：${sub}。用 derive 或 get-reference。`);
+  requireLlm();
+  const target = String(rest[1] || flags.url || flags.file || "").trim();
+  if (!target) throw new Error("用法：template derive <video|url>");
+  const estimatedCost = { calls: { vision: 1 }, note: "一次对标流水线（抽帧 + 视觉 LLM）" };
+  requireYes(flags, estimatedCost);
+  const llmConfig = { baseUrl: LLM.baseUrl, apiKey: LLM.apiKey || "", model: LLM.model };
+  let submitted;
+  if (/^https?:\/\//i.test(target)) {
+    submitted = await api("/api/reference/ingest", { method: "POST", body: { url: target, llmConfig } });
+  } else {
+    const file = fileBlob(target);
+    const form = new FormData();
+    form.append("video", file.blob, file.name);
+    form.append("llmConfig", JSON.stringify(llmConfig));
+    submitted = await api("/api/reference/ingest", { method: "POST", body: form });
+  }
+  const referenceId = submitted.referenceId;
+  if (flags["no-wait"] === true) {
+    return { ok: true, referenceId, estimatedCost, stage: submitted.stage ?? "queued" };
+  }
+  const job = await pollReference(referenceId);
+  return {
+    ok: true,
+    referenceId,
+    estimatedCost,
+    stage: job.stage,
+    draft: job.draft ?? null,
+    needsConfirmation: job.needsConfirmation ?? [],
+    error: job.error ?? null,
+  };
+}
+
 const HELP = `ClipForge CLI · 命令行一句话出片
 
 用法：
@@ -760,17 +1117,32 @@ const HELP = `ClipForge CLI · 命令行一句话出片
                                 默认只预演 diff；用户确认后加 --apply，重试必须复用 operation ID
   clipforge timeline --project <id> --media <id> --plan edit-plan.json [--format otio|edl|csv --out edit.otio]
                                 导出可编辑专业时间线；素材按原文件名重链，不写本机绝对路径
+  clipforge garments list|add --name --category --front <file> [--back <file>] [--view flat|on-model]
+                                服装库：列出或上传（JPEG/PNG/WebP）
+  clipforge looks --set <id> --poses front_stand,side,back --character-name Ada [--character-ref <url>]
+                 [--route compose|vton] [--look <preset>] [--yes] [--no-wait]
+                                生成模特 Look（付费，需 --yes）；looks --help 看完整用法
+  clipforge looks list --set <id> [--status accepted]
+  clipforge looks accept <lookId>
+  clipforge fashion --template mirror_turn --set <id> --character-name Ada [--character-ref <url>] [--yes]
+                                用已接受 Look 建时装项目，再 compose 出片
+  clipforge template derive <video|url> [--yes] [--no-wait]   从对标视频抽结构（付费视觉 LLM）
+  clipforge template get-reference <referenceId>
   clipforge get --project <id>  查最新成片地址
   clipforge --help | --version
 
 环境变量：
   CLIPFORGE_BASE_URL（默认 http://localhost:3000，需先 pnpm dev/start）
-  CLIPFORGE_LLM_BASE_URL / CLIPFORGE_LLM_API_KEY / CLIPFORGE_LLM_MODEL（create 必需）
+  CLIPFORGE_LLM_BASE_URL / CLIPFORGE_LLM_API_KEY / CLIPFORGE_LLM_MODEL（create / template derive 必需）
+  CLIPFORGE_IMAGE_PROVIDER / CLIPFORGE_IMAGE_MODEL / CLIPFORGE_IMAGE_API_KEY / CLIPFORGE_IMAGE_BASE_URL（looks compose）
+  CLIPFORGE_FASHN_API_KEY / CLIPFORGE_FASHN_BASE_URL（looks --route vton）
   CLIPFORGE_PEXELS_KEY / CLIPFORGE_PIXABAY_KEY（可选）
 
 进度打印到 stderr，最终结果（含 videoUrl）打印到 stdout，便于管道取值。`;
 
-const COMMANDS = { create: cmdCreate, product: cmdProduct, import: cmdImport, dub: cmdDub, compose: cmdCompose, cover: cmdCover, qr: cmdQr, endcard: cmdEndcard, export: cmdExport, qc: cmdQc, master: cmdMaster, gate: cmdGate, credits: cmdCredits, native: cmdNative, preview: cmdPreview, sheet: cmdSheet, carousel: cmdCarousel, clips: cmdClips, transcript: cmdTranscriptInspect, "transcript-edit": cmdTranscriptEdit, timeline: cmdTimelineExport, list: cmdList, voices: cmdVoices, get: cmdGet, trends: cmdTrends };
+const COMMANDS = { create: cmdCreate, product: cmdProduct, import: cmdImport, dub: cmdDub, compose: cmdCompose, cover: cmdCover, qr: cmdQr, endcard: cmdEndcard, export: cmdExport, qc: cmdQc, master: cmdMaster, gate: cmdGate, credits: cmdCredits, native: cmdNative, preview: cmdPreview, sheet: cmdSheet, carousel: cmdCarousel, clips: cmdClips, transcript: cmdTranscriptInspect, "transcript-edit": cmdTranscriptEdit, timeline: cmdTimelineExport, list: cmdList, voices: cmdVoices, get: cmdGet, trends: cmdTrends, garments: cmdGarments, looks: cmdLooks, fashion: cmdFashion, template: cmdTemplate };
+
+const COMMAND_HELP = { garments: GARMENTS_HELP, looks: LOOKS_HELP, fashion: FASHION_CMD_HELP, template: TEMPLATE_HELP };
 
 async function main() {
   const { _, flags } = parseArgs(process.argv.slice(2));
@@ -779,6 +1151,10 @@ async function main() {
     return 0;
   }
   const cmd = _[0];
+  if (cmd && COMMAND_HELP[cmd] && (flags.help || flags.h || _[1] === "help")) {
+    process.stdout.write(COMMAND_HELP[cmd] + "\n");
+    return 0;
+  }
   if (!cmd || flags.help || flags.h || cmd === "help") {
     process.stdout.write(HELP + "\n");
     return cmd && !COMMANDS[cmd] ? 1 : 0;
@@ -788,7 +1164,7 @@ async function main() {
     process.stderr.write(`未知命令：${cmd}\n\n${HELP}\n`);
     return 1;
   }
-  const result = await handler(flags);
+  const result = await handler(flags, _.slice(1));
   if (flags.json) {
     process.stdout.write(JSON.stringify(result, null, 2) + "\n");
   } else {
@@ -804,11 +1180,11 @@ async function main() {
 }
 
 // Only run when executed as an entry point (not when imported by unit tests)
-if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   main()
     .then((code) => process.exit(code ?? 0))
     .catch((e) => {
       process.stderr.write(`✗ ${e?.message || e}\n`);
-      process.exit(1);
+      process.exit(typeof e?.exitCode === "number" ? e.exitCode : 1);
     });
 }

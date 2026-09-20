@@ -51,7 +51,7 @@ export async function GET() {
 /**
  * POST /api/ad-template/mine —— save one template OR a whole pack.
  * body: { share: string } (imported share-file text, single or pack envelope)
- *       OR { template: object, source?: "edit" } (AI custom result / editor fork).
+ *       OR { template: object, source?: "edit" | "reference" } (AI custom / editor fork / derived).
  */
 export async function POST(req: NextRequest) {
   let body: Record<string, unknown> = {};
@@ -78,10 +78,18 @@ export async function POST(req: NextRequest) {
     return apiError(req, err.zh, err.en, 422);
   }
 
-  const source = body.source === "edit" ? "edit" : isImport ? "import" : "ai";
+  const source =
+    body.source === "edit"
+      ? "edit"
+      : body.source === "reference"
+        ? "reference"
+        : isImport
+          ? "import"
+          : "ai";
   const db = getDb();
   const rows = await db
     .insert(adTemplateRecipes)
+    // schema.ts TS enum is ai|import|edit (do not edit schema.ts); SQLite column is unconstrained TEXT
     .values(result.templates.map((t) => ({ recipe: t, source: source as "ai" | "import" | "edit" })))
     .returning();
   const templates = rows.map((row) => ({ ...(row.recipe as AdTemplate), id: row.id, source: row.source }));

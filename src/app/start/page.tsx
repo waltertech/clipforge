@@ -844,6 +844,14 @@ export default function StartPage() {
             )}
           </div>
 
+          <Link href="/looks/video" className="cf-pj" style={{ maxWidth: 620, margin: "18px auto 0", display: "flex" }}>
+            <span className="dot" />
+            <span className="col">
+              <span className="nm">{t("entryLooksVideo")}</span>
+              <span className="cf-pj-meta">{t("entryLooksVideoDesc")}</span>
+            </span>
+          </Link>
+
           {showGuide && (
             <div className="cf-guide">
               <button type="button" className="cf-guide-close" onClick={dismissGuide} aria-label={t("guideClose")}>✕</button>

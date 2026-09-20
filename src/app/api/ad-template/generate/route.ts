@@ -1,10 +1,16 @@
 import { NextRequest, NextResponse } from "next/server";
 import { apiError } from "@/lib/api-error";
-import { createLLMClient, llmErrorPair, withLLMErrors } from "@/lib/llm-error";
+import { createLLMClient, jsonModeParams, llmErrorPair, withLLMErrors } from "@/lib/llm-error";
 import { reasoningParams } from "@/lib/script-engine/generator";
-import { sanitizeCustomAdTemplate, AD_TEMPLATE_GROUPS } from "@/lib/ad-templates";
+import { sanitizeCustomAdTemplate, sanitizeFashionFields, AD_TEMPLATE_GROUPS } from "@/lib/ad-templates";
 import { CAMERA_PRESETS } from "@/lib/camera-presets";
 import { LOOK_PRESETS } from "@/lib/look-presets";
+import { GARMENT_CATEGORIES } from "@/lib/pose-presets";
+import {
+  buildFashionTemplatePrompt,
+  hasUnknownPoseIssue,
+  parseFashionTemplateOutput,
+} from "@/lib/ad-template-fashion-gen";
 
 /**
  * AI custom ad-template generation: turn a concrete product (name / category /
@@ -17,6 +23,9 @@ import { LOOK_PRESETS } from "@/lib/look-presets";
  * are the SDK's job via createLLMClient; anything that still fails surfaces to the
  * user with an actionable message. Blind app-level retry loops stay banned
  * project-wide (paid-task discipline) — those would re-submit billable work.
+ *
+ * Exception (kind:"fashion"): the fashion-workbench spec retries up to 3 times when
+ * sanitizeFashionFields drops unknown pose ids, then returns 422 template_generation_failed.
  */
 
 const STYLE_GLOSS: Record<string, string> = {
@@ -66,8 +75,70 @@ function buildPrompt(productName: string, category: string, sellingPoints: strin
   ].filter(Boolean).join("\n");
 }
 
+const FASHION_ATTEMPTS = 3;
+
+async function generateFashion(req: NextRequest, body: Record<string, unknown>): Promise<NextResponse> {
+  const rawCfg = body.llmConfig as { baseUrl?: string; apiKey?: string; model?: string; visionModel?: string } | undefined;
+  const baseUrl = rawCfg?.baseUrl;
+  const model = rawCfg?.model;
+  if (!baseUrl || !model) {
+    return apiError(req, "请先在设置中配置 LLM 参数", "Please configure the LLM in settings first");
+  }
+  const llmConfig = { baseUrl, apiKey: rawCfg?.apiKey ?? "", model, visionModel: rawCfg?.visionModel };
+  const brief = typeof body.brief === "string" ? body.brief.slice(0, 500) : "";
+  const productName = typeof body.productName === "string" ? body.productName.trim() : "";
+  const garmentCategories = Array.isArray(body.garmentCategories)
+    ? body.garmentCategories.filter((c): c is string => typeof c === "string" && (GARMENT_CATEGORIES as readonly string[]).includes(c))
+    : undefined;
+  const prompt = buildFashionTemplatePrompt({ brief, garmentCategories, productName });
+
+  try {
+    const client = createLLMClient(llmConfig);
+    let lastIssues: string[] = [];
+    for (let attempt = 0; attempt < FASHION_ATTEMPTS; attempt++) {
+      const response = await withLLMErrors(
+        () =>
+          client.chat.completions.create({
+            model,
+            messages: [
+              { role: "system", content: "你是资深时装短视频导演，只输出 JSON。" },
+              { role: "user", content: prompt },
+            ],
+            temperature: 0.4,
+            ...reasoningParams(baseUrl),
+            ...jsonModeParams(baseUrl),
+          }),
+        llmConfig,
+      );
+      const text = response.choices[0]?.message?.content ?? "";
+      const parsed = parseFashionTemplateOutput(text);
+      if (!parsed) {
+        lastIssues = ["invalid json"];
+        continue;
+      }
+      const { fields, issues } = sanitizeFashionFields(parsed.fashion);
+      lastIssues = issues;
+      if (hasUnknownPoseIssue(issues)) continue;
+      const template = sanitizeCustomAdTemplate({ ...parsed, kind: "fashion", fashion: fields });
+      if (!template) {
+        lastIssues = ["sanitize failed"];
+        continue;
+      }
+      return NextResponse.json({ template });
+    }
+    return NextResponse.json({ error: "template_generation_failed", issues: lastIssues }, { status: 422 });
+  } catch (error) {
+    console.error("AI 时装模板生成失败:", error);
+    const { zh, en } = llmErrorPair(error);
+    return apiError(req, `AI 定制模板生成失败: ${zh}`, `AI template generation failed: ${en}`, 500);
+  }
+}
+
 export async function POST(req: NextRequest) {
   const body = await req.json();
+  if (body.kind === "fashion") {
+    return generateFashion(req, body);
+  }
   const productName = typeof body.productName === "string" ? body.productName.trim() : "";
   const category = typeof body.category === "string" ? body.category : "";
   const sellingPoints = typeof body.sellingPoints === "string" ? body.sellingPoints.slice(0, 500) : "";

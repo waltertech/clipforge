@@ -192,3 +192,79 @@ describe("物理真实感层（品类约束/物理交互/活背景/情绪过程�
     expect(p).not.toMatch(/[一-鿿]/); // 不混中文
   });
 });
+
+describe("Fashion Look lock 注入", () => {
+  const negative = { zh: "文字水印、多手指", en: "text or watermark, extra fingers" };
+
+  it("lock 三项全 true 时追加三条禁改句与 negative", () => {
+    const zh = buildMotionPrompt({
+      shotType: "demo",
+      description: "走秀",
+      lock: { face: true, garmentPattern: true, noOutfitChange: true, negative },
+    });
+    expect(zh).toContain("人物的脸型、五官与发型全程保持不变");
+    expect(zh).toContain("服装的颜色、图案与版型全程保持与首帧完全一致");
+    expect(zh).toContain("不得换装、不得增减衣物或配饰");
+    expect(zh).toContain("避免：文字水印、多手指");
+
+    const en = buildMotionPrompt({
+      shotType: "demo",
+      camera: "smooth follow",
+      description: "runway walk",
+      lock: { face: true, garmentPattern: true, noOutfitChange: true, negative },
+    });
+    expect(en).toContain("the person's face, features and hairstyle stay identical throughout");
+    expect(en).toContain("garment colour, pattern and cut stay exactly as in the first frame throughout");
+    expect(en).toContain("no outfit change, no garments or accessories added or removed");
+    expect(en).toContain("Avoid: text or watermark, extra fingers");
+    expect(en).not.toMatch(/[一-鿿]/);
+  });
+
+  it("仅 garmentPattern=true 时只追加图案锁定句", () => {
+    const p = buildMotionPrompt({
+      shotType: "hook",
+      description: "开场",
+      lock: { face: false, garmentPattern: true, noOutfitChange: false },
+    });
+    expect(p).toContain("服装的颜色、图案与版型全程保持与首帧完全一致");
+    expect(p).not.toContain("人物的脸型、五官与发型全程保持不变");
+    expect(p).not.toContain("不得换装、不得增减衣物或配饰");
+    expect(p).not.toContain("避免：");
+  });
+
+  it("lock: undefined 与不传 lock 字节级一致（中英多样本）", () => {
+    const samples = [
+      { shotType: "hook", description: "开场" },
+      { shotType: "demo", camera: "smooth follow", description: "applying cream", productShot: true as const },
+      {
+        shotType: "product_reveal",
+        description: "商品展示",
+        productShot: true as const,
+        personShot: true as const,
+        category: "fashion",
+        beatSeed: 2,
+      },
+    ];
+    for (const input of samples) {
+      expect(buildMotionPrompt({ ...input, lock: undefined })).toBe(buildMotionPrompt(input));
+    }
+  });
+
+  it("hasCameraConflict 不受 lock 影响", () => {
+    expect(hasCameraConflict("固定镜头，环绕拍摄")).toBe(true);
+    expect(hasCameraConflict("static camera with a slow orbit")).toBe(true);
+    expect(hasCameraConflict("镜头先推近，最后固定")).toBe(false);
+    expect(hasCameraConflict("push in, then locked off")).toBe(false);
+    expect(hasCameraConflict("固定镜头")).toBe(false);
+    expect(hasCameraConflict("缓慢环绕")).toBe(false);
+    const conflicted = buildMotionPrompt({
+      shotType: "product_reveal",
+      camera: "固定镜头，环绕拍摄",
+      description: "商品",
+      lock: { face: true, garmentPattern: true, noOutfitChange: true },
+    });
+    expect(conflicted).not.toContain("固定镜头，环绕拍摄");
+    expect(conflicted).toContain("运镜：镜头围绕商品缓慢环绕移动");
+    expect(conflicted).toContain("人物的脸型、五官与发型全程保持不变");
+  });
+});
